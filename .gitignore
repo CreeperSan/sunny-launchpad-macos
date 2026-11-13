@@ -24,3 +24,9 @@ Icon
 Network Trash Folder
 Temporary Items
 .apdisk
+
+# Swift 构建产物和本机数据
+.build/
+.swiftpm/
+build/
+.DS_Store
