@@ -47,6 +47,8 @@ import SunnyDomain
 
 /// 独立图标视图保持稳定身份，实时重排只改变 frame，不销毁重建。
 @MainActor final class NativeTile: NSView {
+    /// 文件夹缩略图玻璃容器的圆角比例，与展开动画起点保持一致。
+    static let folderCornerRadiusRatio: CGFloat = 0.23
     var item: LayoutItem?
     weak var owner: NativeLauncherView?
     let icon = NativeImageSurface()
@@ -88,8 +90,8 @@ import SunnyDomain
         if loading { icon.image = nil; skeleton.opacity = 1 }
         else if icon.image !== image { revealIcon(image, animated: skeleton.opacity > 0) }
         let size = NSSize(width: max(16, iconSize), height: max(16, iconSize))
-        folderGlass.cornerRadius = size.width * 0.23
-        icon.layer?.cornerRadius = size.width * 0.23
+        folderGlass.cornerRadius = size.width * Self.folderCornerRadiusRatio
+        icon.layer?.cornerRadius = size.width * Self.folderCornerRadiusRatio
         if icon.frame.size != size { icon.setFrameSize(size); needsLayout = true }
         layer?.cornerRadius = 20
         layer?.borderWidth = selected || grouping ? 2 : 0

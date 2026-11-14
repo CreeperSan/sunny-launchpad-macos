@@ -80,6 +80,18 @@ public enum LayoutEditor {
         // 先记录目标文件夹，处理移动唯一子项时 remove 自动清理空文件夹的情况。
         guard let original = result.folders.first(where: { $0.id == folderID }) else { return layout }
         if original.appIDs.count == 1 && sourceID == "app:\(original.appIDs[0])" { return layout }
+        if let appID = original.appIDs.first(where: { "app:\($0)" == sourceID }) {
+            // 先保留原始页索引，再移除源项；否则源页变空时目标页会错位。
+            updateFolder(folderID, in: &result) { folder in
+                var pages = folder.pages.map { $0.filter { $0 != appID } }
+                let pageIndex = min(max(page, 0), pages.count - 1)
+                let index = target.flatMap { pages[pageIndex].firstIndex(of: $0) } ?? pages[pageIndex].count
+                pages[pageIndex].insert(appID, at: index)
+                folder.pages = chunks(pages.flatMap { $0 }, size: LaunchpadRules.folderCapacity)
+            }
+            normalize(&result, capacity: capacity)
+            return result
+        }
         guard case .app(let appID) = remove(sourceID, from: &result) else { return layout }
         updateFolder(folderID, in: &result) { folder in
             let pageIndex = min(max(page, 0), max(folder.pages.count - 1, 0))

@@ -10,8 +10,16 @@ import SunnyDomain
     /// 文件夹标题与面板之间的布局尺寸。
     private static let folderHeaderHeight: CGFloat = 62
     private static let folderTitleFontSize: CGFloat = 28
+    /// 文件夹详情玻璃容器的目标圆角。
+    private static let folderCornerRadius: CGFloat = 44
+    /// 曲线求解精度以及无法读取屏幕刷新率时的兜底帧率。
+    private static let timingSearchSteps = 12
+    private static let fallbackFrameRate = 60
     /// 手势位置两侧预备的页数。
     private static let pagePreloadRadius = 1
+    /// 拖到网格边缘并停留后翻页，避免经过边缘时误触。
+    private static let dragPageEdgeWidth: CGFloat = 60
+    private static let dragPageDelay: Duration = .milliseconds(650)
     private let store: LaunchpadStore
     private let wallpaper = NativeImageSurface()
     private let tint = NSView()
@@ -22,8 +30,6 @@ import SunnyDomain
     private let searchIcon = NSImageView()
     private let pages = NativeSurface()
     private let pager = NativePageControl()
-    private let settings = NSButton()
-    private let organize = NSButton()
     private let loading = NSTextField(labelWithString: "")
     private let folder = NativeSurface()
     private let folderBackground = NSView()
@@ -52,6 +58,15 @@ import SunnyDomain
     private var dragTarget: LayoutItem?
     private var dragGroup = false
     private var lastPreview: String?
+    private var previewContext: String?
+    private var folderTransitionTask: Task<Void, Never>?
+    private var folderPanelTask: Task<Void, Never>?
+    private var folderTransitionIcons: [CALayer] = []
+    private var folderTransitionHiddenIcons: [CALayer] = []
+    private var dragMonitor: Any?
+    private var dragPageTask: Task<Void, Never>?
+    private var dragPageDirection = 0
+    private var dragTargetPage: Int?
     private let ghost = CALayer()
     private let dragGlass = NSGlassEffectView()
     private var pointerStart = NSPoint.zero
@@ -85,8 +100,6 @@ import SunnyDomain
         content.addSubview(search)
         content.addSubview(pages)
         content.addSubview(pager)
-        content.addSubview(settings)
-        content.addSubview(organize)
         content.addSubview(loading)
         pages.addSubview(skeletonGrid)
         pages.layer?.masksToBounds = true
@@ -115,28 +128,23 @@ import SunnyDomain
         // 搜索内容变化不触发启动，只有明确回车或点击图标才会启动。
         search.target = nil
         search.action = nil
-        settings.target = self
-        settings.action = #selector(openSettings)
-        settings.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
-        settings.contentTintColor = .white
-        settings.isBordered = false
-        organize.target = self
-        organize.action = #selector(toggleOrganizing)
-        organize.isBordered = false
-        organize.contentTintColor = .white
         loading.alignment = .center
         loading.textColor = .white
         folder.consumeBackgroundEvents = true
         folderPages.consumeBackgroundEvents = true
         folder.wantsLayer = true
-        folder.layer?.cornerRadius = 44
-        folder.layer?.masksToBounds = true
+        folder.layer?.cornerRadius = Self.folderCornerRadius
+        // 收起时玻璃需要移动到详情面板之外的原始图标位置。
+        folder.layer?.masksToBounds = false
         folderBackground.wantsLayer = true
-        folderBackground.layer?.cornerRadius = 44
+        folderBackground.layer?.cornerRadius = Self.folderCornerRadius
         folder.addSubview(folderBackground)
-        folderGlass.cornerRadius = 44
+        folderGlass.cornerRadius = Self.folderCornerRadius
         folderGlass.style = .clear
         folder.addSubview(folderGlass)
+        // 分别裁剪玻璃和不透明背景，使两种外观使用相同的圆角过渡。
+        folderGlass.layer?.masksToBounds = true
+        folderBackground.layer?.masksToBounds = true
         folder.isHidden = true
         addSubview(folder)
         dragGlass.style = .clear
@@ -170,6 +178,7 @@ import SunnyDomain
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window == nil, dragSource != nil { cancelTileDrag() }
         window?.makeFirstResponder(search)
         frameMeter.attach(to: self)
         render()
@@ -232,8 +241,6 @@ import SunnyDomain
         search.frame = NSRect(x: searchGlass.frame.minX + 39, y: searchGlass.frame.midY - 11, width: searchGlass.frame.width - 54, height: 22)
         pages.frame = NSRect(x: 0, y: insets.top + 85, width: bounds.width, height: max(100, bounds.height - insets.top - insets.bottom - 190))
         pager.frame = NSRect(x: bounds.midX - 90, y: bounds.height - insets.bottom - 88, width: 180, height: 44)
-        settings.frame = NSRect(x: bounds.width - 80, y: bounds.height - insets.bottom - 40, width: 44, height: 32)
-        organize.frame = NSRect(x: bounds.width - 230, y: settings.frame.minY, width: 140, height: 32)
         loading.frame = NSRect(x: bounds.midX - 250, y: bounds.midY - 20, width: 500, height: 40)
         revision = ""
         previousPage = .nan
@@ -260,13 +267,9 @@ import SunnyDomain
             cell.placeholderAttributedString = NSAttributedString(string: store.text("search"), attributes: [.foregroundColor: NSColor.white.withAlphaComponent(0.7)])
         }
         if search.stringValue != store.query { search.stringValue = store.query }
-        settings.toolTip = store.text("settings")
-        organize.title = store.text(store.organizing ? "done" : "organize")
         loading.stringValue = store.state.catalog.isEmpty ? store.text(store.catalogLoading ? "loading" : "empty") : ""
         let modal = store.folderID != nil
         search.isEnabled = !modal
-        organize.isEnabled = !modal && store.canEdit
-        settings.isEnabled = !modal
         pager.isHidden = modal
         let signature = "\(store.pageIndex)|\(store.folderPage)|\(store.layoutRevision)|\(store.query)|\(config)|\(store.keyboardSelection)|\(store.selectedIndex)|\(store.groupingTarget ?? "")|\(store.groupingReady)"
         let changed = revision != signature
@@ -287,6 +290,8 @@ import SunnyDomain
         let rootPages = store.isSearching ? LayoutEditor.chunks(store.searchResults.map { LayoutItem.app($0.id) }, size: config.capacity) : store.displayedLayout.pages.map(\.items)
         updateSkeleton(metrics: metrics)
         updatePages(rootPages.isEmpty ? [[]] : rootPages, surfaces: &pageViews, tileMap: &tiles, container: pages, metrics: metrics, columns: config.columns, rows: config.rows, rebuild: changed, inFolder: false)
+        // 过渡层独占展开中的文件夹，避免主页面的缩略图和玻璃容器同时露出。
+        for (id, tile) in tiles { tile.isHidden = store.folderID.map { id == "folder:\($0)" } ?? false }
         if !modal {
             pager.count = store.pageCount; pager.active = store.activePage; pager.style = config.pagerStyle
             pager.needsDisplay = true
@@ -432,6 +437,89 @@ import SunnyDomain
         return image
     }
 
+    /// 缩略图与详情共用同一组几何位置，避免过渡时图标跳动。
+    private func thumbnailRect(_ index: Int, in frame: CGRect) -> CGRect {
+        let scale = frame.width / 96
+        return CGRect(x: frame.minX + CGFloat(10 + index % 3 * 27) * scale, y: frame.minY + CGFloat(8 + index / 3 * 27) * scale, width: 23 * scale, height: 23 * scale)
+    }
+
+    /// 同步更新原生玻璃的尺寸和圆角，避免直接修改视图托管图层导致坐标错位。
+    private func setFolderPanel(frame: CGRect, cornerRadius: CGFloat) {
+        folderGlass.frame = frame
+        folderGlass.cornerRadius = cornerRadius
+        folderBackground.frame = frame
+        folderBackground.layer?.cornerRadius = cornerRadius
+    }
+
+    /// 根据屏幕刷新率插值原生视图；反向时从当前帧继续，不跳回动画起点。
+    private func animateFolderPanel(from start: CGRect, radius startRadius: CGFloat, to end: CGRect, radius endRadius: CGFloat, duration: Double) {
+        folderPanelTask?.cancel(); folderPanelTask = nil
+        setFolderPanel(frame: start, cornerRadius: startRadius)
+        guard duration > 0 else { setFolderPanel(frame: end, cornerRadius: endRadius); return }
+        let startTime = CACurrentMediaTime()
+        let interval = 1.0 / Double(max(window?.screen?.maximumFramesPerSecond ?? Self.fallbackFrameRate, 1))
+        folderPanelTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let elapsed = min((CACurrentMediaTime() - startTime) / duration, 1)
+                // 与其他过渡使用相同的贝塞尔缓动，先根据横坐标求曲线参数。
+                var lower = 0.0, upper = 1.0
+                for _ in 0..<Self.timingSearchSteps {
+                    let t = (lower + upper) / 2
+                    let x = 3 * (1 - t) * (1 - t) * t * LayerAnimation.timingX1 + 3 * (1 - t) * t * t * LayerAnimation.timingX2 + t * t * t
+                    if x < elapsed { lower = t } else { upper = t }
+                }
+                let t = (lower + upper) / 2
+                let progress = CGFloat(3 * (1 - t) * (1 - t) * t * LayerAnimation.timingY1 + 3 * (1 - t) * t * t * LayerAnimation.timingY2 + t * t * t)
+                func interpolate(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a + (b - a) * progress }
+                let frame = CGRect(x: interpolate(start.minX, end.minX), y: interpolate(start.minY, end.minY), width: interpolate(start.width, end.width), height: interpolate(start.height, end.height))
+                self.setFolderPanel(frame: frame, cornerRadius: interpolate(startRadius, endRadius))
+                if elapsed >= 1 {
+                    self.setFolderPanel(frame: end, cornerRadius: endRadius)
+                    self.folderPanelTask = nil
+                    return
+                }
+                try? await Task.sleep(for: .seconds(interval))
+            }
+        }
+    }
+
+    /// 使用独立图层承接前九个图标，玻璃和文字保持各自的动画。
+    private func animateFolderTransition(_ data: AppFolder, opening: Bool, duration: Double) {
+        folderTransitionTask?.cancel()
+        folderTransitionIcons.forEach { $0.removeFromSuperlayer() }
+        folderTransitionHiddenIcons.forEach { $0.opacity = 1 }
+        folderTransitionIcons.removeAll(); folderTransitionHiddenIcons.removeAll()
+        guard duration > 0, store.folderPage == 0, let layer else { return }
+        folder.layoutSubtreeIfNeeded()
+        for (index, id) in data.appIDs.prefix(9).enumerated() {
+            guard let tile = folderTiles["app:\(id)"], tile.superview === folderPageViews[0] else { continue }
+            tile.layoutSubtreeIfNeeded()
+            let destination = tile.icon.convert(tile.icon.bounds, to: self)
+            let source = thumbnailRect(index, in: folderSource)
+            guard !destination.isEmpty, let iconLayer = tile.icon.layer else { continue }
+            let proxy = CALayer()
+            proxy.contents = AppIconCache.shared.image(for: store.app(id)).cgImage(forProposedRect: nil, context: nil, hints: nil)
+            proxy.contentsGravity = .resizeAspect
+            proxy.zPosition = 90
+            proxy.frame = opening ? destination : source
+            layer.addSublayer(proxy)
+            iconLayer.opacity = 0
+            folderTransitionIcons.append(proxy); folderTransitionHiddenIcons.append(iconLayer)
+            let start = opening ? source : destination
+            let end = opening ? destination : source
+            LayerAnimation.apply(proxy, key: "position", value: NSValue(point: CGPoint(x: end.midX, y: end.midY)), duration: duration, screen: window?.screen, startValue: NSValue(point: CGPoint(x: start.midX, y: start.midY)))
+            LayerAnimation.apply(proxy, key: "bounds", value: NSValue(rect: CGRect(origin: .zero, size: end.size)), duration: duration, screen: window?.screen, startValue: NSValue(rect: CGRect(origin: .zero, size: start.size)))
+        }
+        folderTransitionTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(duration))
+            guard !Task.isCancelled, let self else { return }
+            self.folderTransitionIcons.forEach { $0.removeFromSuperlayer() }
+            self.folderTransitionHiddenIcons.forEach { $0.opacity = 1 }
+            self.folderTransitionIcons.removeAll(); self.folderTransitionHiddenIcons.removeAll()
+        }
+    }
+
     private func transformPages(_ surfaces: [Int: NativeSurface], position: Double, container: NSView, animated: Bool) {
         let config = store.preferences.interaction
         let duration = animated && store.motion != nil && config.pageAnimation != .none ? config.pageDuration : 0
@@ -469,6 +557,7 @@ import SunnyDomain
 
     private func updateFolder(changed: Bool) {
         guard let data = store.folder else {
+            folderPanelTask?.cancel(); folderPanelTask = nil
             folder.isHidden = true
             if previousFolderID != nil {
                 content.layer?.opacity = Float(store.revealProgress)
@@ -494,8 +583,7 @@ import SunnyDomain
         let target = NSRect(x: bounds.midX - width / 2, y: bounds.midY - height / 2, width: width, height: height)
         folder.frame = target
         // 标题置于半透明面板上方，布局参照 LaunchOS 的文件夹展开样式。
-        folderGlass.frame = NSRect(x: 0, y: Self.folderHeaderHeight, width: width, height: height - Self.folderHeaderHeight)
-        folderBackground.frame = folderGlass.frame
+        let panel = NSRect(x: 0, y: Self.folderHeaderHeight, width: width, height: height - Self.folderHeaderHeight)
         folderTitle.frame = NSRect(x: 30, y: 4, width: width - 60, height: 42)
         if opening { folderTitle.stringValue = data.name }
         folderPages.frame = NSRect(x: 12, y: 65 + headerExtra, width: width - 24, height: height - 115 - headerExtra)
@@ -513,19 +601,21 @@ import SunnyDomain
         folder.isHidden = false
         if previousFolderProgress != store.folderProgress || opening {
             let progress = store.folderProgress
-            let scaleX = max(0.05, folderSource.width / target.width)
-            let scaleY = max(0.05, folderSource.height / target.height)
-            var from = CATransform3DMakeScale(scaleX, scaleY, 1)
-            from.m41 = folderSource.minX - target.minX
-            from.m42 = folderSource.minY - target.minY
-            let duration = store.motion == nil || opening ? 0 : LayerAnimation.folderDuration
-            if let layer = folder.layer {
-                LayerAnimation.apply(layer, key: "transform", value: NSValue(caTransform3D: progress == 0 ? from : CATransform3DIdentity), duration: duration, screen: window?.screen)
-                LayerAnimation.apply(layer, key: "opacity", value: Float(progress), duration: duration, screen: window?.screen)
+            let source = convert(folderSource, to: folder)
+            let duration = store.motion == nil || (opening && progress == 0) ? 0 : LayerAnimation.folderDuration
+            let sourceRadius = min(source.width, source.height) * NativeTile.folderCornerRadiusRatio
+            let start = opening ? source : folderGlass.frame
+            let startRadius = opening ? sourceRadius : folderGlass.cornerRadius
+            animateFolderPanel(from: start, radius: startRadius, to: progress == 0 ? source : panel, radius: progress == 0 ? sourceRadius : Self.folderCornerRadius, duration: duration)
+            for layer in [folderTitle.layer, folderPages.layer, folderPager.layer].compactMap({ $0 }) {
+                LayerAnimation.apply(layer, key: "opacity", value: Float(progress), duration: duration, screen: window?.screen, startValue: opening && progress == 1 ? Float(0) : nil)
             }
-            if let layer = content.layer { LayerAnimation.apply(layer, key: "opacity", value: Float((1 - progress) * store.revealProgress), duration: duration, screen: window?.screen) }
+            if duration > 0 { animateFolderTransition(data, opening: progress == 1, duration: duration) }
+            if let layer = content.layer { LayerAnimation.apply(layer, key: "opacity", value: Float((1 - progress) * store.revealProgress), duration: duration, screen: window?.screen, startValue: opening && progress == 1 ? Float(store.revealProgress) : nil) }
             previousFolderProgress = progress
             frameMeter.sample(for: duration)
+        } else if folderPanelTask == nil && store.folderProgress == 1 {
+            setFolderPanel(frame: panel, cornerRadius: Self.folderCornerRadius)
         }
     }
 
@@ -591,6 +681,11 @@ import SunnyDomain
     public func performReveal() { render() }
 
     public override func scrollWheel(with event: NSEvent) {
+        if dragSource != nil {
+            dragTarget = nil; dragGroup = false; lastPreview = nil
+            store.hoverGroup(nil)
+            dragPageTask?.cancel(); dragPageTask = nil; dragPageDirection = 0
+        }
         store.pageWidth = Double(max((store.folderID == nil ? pages : folderPages).bounds.width, 1))
         let delta = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) ? event.scrollingDeltaX : event.scrollingDeltaY
         if !event.hasPreciseScrollingDeltas {
@@ -653,8 +748,6 @@ import SunnyDomain
         return false
     }
     @objc private func launchSelection() { if store.visibleItems.indices.contains(store.selectedIndex) { activate(store.visibleItems[store.selectedIndex]) } }
-    @objc private func openSettings() { store.openSettings() }
-    @objc private func toggleOrganizing() { store.organizing.toggle() }
     @objc private func renameFolder() { if let id = store.folderID { store.renameFolder(id, name: folderTitle.stringValue) } }
     func activate(_ item: LayoutItem) {
         guard store.folderID == nil || store.visibleItems.contains(where: { $0.id == item.id }) else { return }
@@ -686,7 +779,15 @@ import SunnyDomain
     func beginTileDrag(_ tile: NativeTile, event: NSEvent) {
         guard store.canEdit, !store.isSearching, let item = tile.item else { return }
         dragSource = item.id
+        dragTargetPage = store.activePage
         store.beginDrag(item.id)
+        // 翻页时源视图可能被回收；由窗口级监听器继续接收拖动和松手。
+        dragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            guard let self, event.window === self.window, self.dragSource != nil else { return event }
+            if event.type == .leftMouseDragged { self.moveTileDrag(event) }
+            else { self.endTileDrag(event) }
+            return nil
+        }
         ghost.contents = tile.icon.image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
         ghost.bounds = tile.icon.bounds
         let folderDrag: Bool = if case .folder = item { true } else { false }
@@ -702,6 +803,11 @@ import SunnyDomain
     func moveTileDrag(_ event: NSEvent) {
         guard let source = dragSource else { return }
         let point = convert(event.locationInWindow, from: nil)
+        updateDragPageEdge(point)
+        if dragTargetPage != store.activePage {
+            dragTargetPage = store.activePage; dragTarget = nil; dragGroup = false; lastPreview = nil
+            store.hoverGroup(nil)
+        }
         CATransaction.begin(); CATransaction.setDisableActions(true); ghost.position = point; CATransaction.commit()
         if !dragGlass.isHidden { dragGlass.frame = NSRect(x: point.x - ghost.bounds.width / 2, y: point.y - ghost.bounds.height / 2, width: ghost.bounds.width, height: ghost.bounds.height) }
         let map = store.folderID == nil ? tiles : folderTiles
@@ -726,18 +832,55 @@ import SunnyDomain
             let before = local.x > target.bounds.midX ? following : item
             dragTarget = before
             let key = before?.id ?? "end"
-            if key != lastPreview { lastPreview = key; store.previewMove(before: before) }
+            if key != lastPreview {
+                lastPreview = key; store.previewMove(before: before)
+                previewContext = "\(store.folderID ?? "root")|\(store.activePage)"
+            }
         }
     }
     func endTileDrag(_ event: NSEvent) {
         guard dragSource != nil else { return }
+        // 触控板仍在翻页时松手，先吸附到目标页再计算落点。
+        settleTask?.cancel()
+        if store.pageDragging { store.finishPageDrag() }
+        if dragTargetPage != store.activePage { dragTarget = nil; dragGroup = false }
         if store.folderID != nil, !folder.frame.contains(convert(event.locationInWindow, from: nil)) { store.drop(onto: nil, page: store.pageIndex) }
-        else { store.drop(onto: dragTarget, group: dragGroup && store.groupingReady) }
-        dragSource = nil; dragTarget = nil; lastPreview = nil; ghost.opacity = 0; dragGlass.isHidden = true
+        else {
+            if dragTarget == nil && previewContext != "\(store.folderID ?? "root")|\(store.activePage)" { store.previewMove(before: nil) }
+            store.drop(onto: dragTarget, group: dragGroup && store.groupingReady)
+        }
+        clearTileDrag()
         queueRender()
     }
     private func cancelTileDrag() {
-        store.cancelDrag(); dragSource = nil; dragTarget = nil; lastPreview = nil; ghost.opacity = 0; dragGlass.isHidden = true; queueRender()
+        store.cancelDrag(); clearTileDrag(); queueRender()
+    }
+
+    /// 翻页后清除旧页面的悬停目标，允许继续拖向下一页。
+    private func updateDragPageEdge(_ point: NSPoint) {
+        let container = store.folderID == nil ? pages : folderPages
+        let frame = container.convert(container.bounds, to: self)
+        let direction = frame.contains(point) && point.x < frame.minX + Self.dragPageEdgeWidth ? -1 : frame.contains(point) && point.x > frame.maxX - Self.dragPageEdgeWidth ? 1 : 0
+        guard direction != dragPageDirection else { return }
+        dragPageTask?.cancel(); dragPageDirection = direction
+        guard direction != 0 else { return }
+        dragPageTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.dragPageDelay)
+            guard !Task.isCancelled, let self, self.dragSource != nil else { return }
+            self.store.selectPage(self.store.activePage + direction)
+            self.dragTarget = nil; self.dragGroup = false; self.lastPreview = nil
+            self.dragTargetPage = self.store.activePage
+            self.store.hoverGroup(nil)
+            self.dragPageDirection = 0
+            self.updateDragPageEdge(point)
+        }
+    }
+
+    private func clearTileDrag() {
+        dragPageTask?.cancel(); dragPageTask = nil; dragPageDirection = 0
+        if let dragMonitor { NSEvent.removeMonitor(dragMonitor); self.dragMonitor = nil }
+        dragSource = nil; dragTarget = nil; dragTargetPage = nil; dragGroup = false; lastPreview = nil; previewContext = nil
+        ghost.opacity = 0; dragGlass.isHidden = true
     }
 }
 

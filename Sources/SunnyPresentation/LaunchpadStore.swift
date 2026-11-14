@@ -290,7 +290,7 @@ import SunnyDomain
         var updated = state
         if !group, let previewLayout { updated.layout = previewLayout }
         dragOriginal = nil
-        if !group && page == nil && folder == nil, previewLayout != nil {
+        if !group && page == nil, previewLayout != nil {
             // 实时预览已经计算最终位置，松手时直接提交，避免二次移动导致落到末尾。
         } else if let page {
             guard updated.layout.pages.indices.contains(page) else { return }

@@ -7,7 +7,12 @@ import QuartzCore
     static let folderDuration = 0.30
     static let reorderDuration = 0.20
     static let folderHoverDelay: Duration = .milliseconds(450)
-    static let timing = CAMediaTimingFunction(controlPoints: 0.22, 0.72, 0.20, 1)
+    /// 文件夹视图逐帧插值与图层动画共用同一条缓动曲线。
+    static let timingX1 = 0.22
+    static let timingY1 = 0.72
+    static let timingX2 = 0.20
+    static let timingY2 = 1.0
+    static let timing = CAMediaTimingFunction(controlPoints: Float(timingX1), Float(timingY1), Float(timingX2), Float(timingY2))
 
     /// AppKit backing layer 的锚点在原点，显式补偿平移使几何中心固定。
     static func centeredScale(x: CGFloat, y: CGFloat, size: CGSize) -> CATransform3D {

@@ -90,6 +90,87 @@ import SunnyDomain
         #expect(abs(root.icon.frame.width - child.icon.frame.width) < 0.01)
     }
 
+    @Test func folderTransitionAnimatesThumbnailIconsIndependently() async {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let folder = AppFolder(id: "tools", name: "Tools", pages: [["0", "1", "2"]])
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder)])]), catalog: (0...2).map { ApplicationRecord(id: "\($0)", name: "App \($0)") })
+        seed.catalogUpdatedAt = Date()
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        window.contentView = view
+        view.layoutSubtreeIfNeeded()
+        func tiles(in parent: NSView) -> [NativeTile] { (parent as? NativeTile).map { [$0] } ?? parent.subviews.flatMap { tiles(in: $0) } }
+        guard let source = tiles(in: view).first(where: { $0.item?.id == "folder:tools" }) else { Issue.record("没有创建文件夹图标"); return }
+        store.activate(.folder(folder))
+        for _ in 0..<40 { await Task.yield() }
+        #expect(source.isHidden)
+        let icons = (view.layer?.sublayers ?? []).filter { $0.zPosition == 90 }
+        #expect(icons.count == 3)
+        let expandedPositions = icons.map(\.position)
+        store.closeFolder()
+        for _ in 0..<40 { await Task.yield() }
+        let closing = (view.layer?.sublayers ?? []).filter { $0.zPosition == 90 }
+        #expect(closing.count == 3)
+        #expect(closing.map(\.position) != expandedPositions)
+        #expect(source.isHidden)
+    }
+
+    @Test func folderSourceRestoresAfterClosing() async {
+        let folder = AppFolder(id: "tools", name: "Tools", pages: [["0", "1"]])
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder)])]), catalog: (0...1).map { ApplicationRecord(id: "\($0)", name: "App \($0)") })
+        seed.catalogUpdatedAt = Date()
+        seed.preferences.reduceMotion = true
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        window.contentView = view
+        view.layoutSubtreeIfNeeded()
+        func tiles(in parent: NSView) -> [NativeTile] { (parent as? NativeTile).map { [$0] } ?? parent.subviews.flatMap { tiles(in: $0) } }
+        guard let source = tiles(in: view).first(where: { $0.item?.id == "folder:tools" }) else { Issue.record("没有创建文件夹图标"); return }
+        store.activate(.folder(folder))
+        for _ in 0..<40 { await Task.yield() }
+        #expect(source.isHidden)
+        store.closeFolder()
+        for _ in 0..<40 { await Task.yield() }
+        #expect(!source.isHidden)
+    }
+
+    @Test func folderGlassReachesCenteredFrameWithRoundedCorners() async throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let folder = AppFolder(id: "tools", name: "Tools", pages: [["0", "1"]])
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder)])]), catalog: (0...1).map { ApplicationRecord(id: "\($0)", name: "App \($0)") })
+        seed.catalogUpdatedAt = Date()
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        window.contentView = view
+        view.layoutSubtreeIfNeeded()
+        store.activate(.folder(folder))
+        for _ in 0..<40 { await Task.yield() }
+        func descendants(_ parent: NSView) -> [NSView] { parent.subviews.flatMap { [$0] + descendants($0) } }
+        let title = try #require(descendants(view).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Tools" && $0.isEditable })
+        let parent = try #require(title.superview)
+        let glass = try #require(parent.subviews.compactMap { $0 as? NSGlassEffectView }.first)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(glass.cornerRadius > 0 && glass.cornerRadius <= 44)
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(abs(glass.frame.minX) < 0.01)
+        #expect(abs(glass.frame.width - parent.bounds.width) < 0.01)
+        #expect(abs(glass.cornerRadius - 44) < 0.01)
+        let rect = glass.convert(glass.bounds, to: view)
+        #expect(abs(rect.midX - view.bounds.midX) < 0.01)
+    }
+
     @Test func openFolderRoutesHitsToItsContents() async {
         let folder = AppFolder(id: "tools", name: "Tools", pages: [["0", "1"]])
         var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder), .app("2")])]), catalog: (0...2).map { ApplicationRecord(id: "\($0)", name: "App \($0)") })
@@ -182,6 +263,62 @@ import SunnyDomain
         store.previewMove(before: .app("3"))
         let preview = store.displayedLayout
         store.drop(onto: nil)
+        for _ in 0..<100 where store.dragPreviewActive { await Task.yield() }
+        #expect(store.state.layout == preview)
+    }
+
+    @Test func crossPageDropCommitsPreviewInRootAndFolder() async {
+        let folderApps = (0..<LaunchpadRules.folderCapacity + 2).map { "f\($0)" }
+        let folder = AppFolder(id: "tools", name: "Tools", pages: LayoutEditor.chunks(folderApps, size: LaunchpadRules.folderCapacity))
+        let pages = [LayoutPage(items: [.app("a"), .folder(folder)]), LayoutPage(items: [.app("b")])]
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: pages), catalog: (["a", "b"] + folderApps).map { ApplicationRecord(id: $0, name: $0) })
+        seed.catalogUpdatedAt = Date()
+        seed.preferences.reduceMotion = true
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        store.beginDrag("app:a")
+        store.selectPage(1)
+        store.previewMove(before: .app("b"))
+        store.drop(onto: .app("b"))
+        for _ in 0..<100 where store.dragPreviewActive { await Task.yield() }
+        #expect(store.state.layout.pages[1].items == [.app("a"), .app("b")])
+        store.selectPage(0)
+        store.activate(.folder(folder))
+        for _ in 0..<20 { await Task.yield() }
+        store.beginDrag("app:\(folderApps[0])")
+        store.selectPage(1)
+        store.previewMove(before: .app(folderApps.last!))
+        let expected = store.displayedLayout
+        store.drop(onto: .app(folderApps.last!))
+        for _ in 0..<100 where store.dragPreviewActive { await Task.yield() }
+        #expect(store.state.layout == expected)
+    }
+
+    @Test func droppingOutsideTilesKeepsLastReorderPreview() async {
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.app("a"), .app("b"), .app("c")])]), catalog: ["a", "b", "c"].map { ApplicationRecord(id: $0, name: $0) })
+        seed.catalogUpdatedAt = Date()
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        window.contentView = view
+        view.layoutSubtreeIfNeeded()
+        func tiles(in parent: NSView) -> [NativeTile] { (parent as? NativeTile).map { [$0] } ?? parent.subviews.flatMap { tiles(in: $0) } }
+        guard let source = tiles(in: view).first(where: { $0.item?.id == "app:a" }),
+              let target = tiles(in: view).first(where: { $0.item?.id == "app:c" }) else { Issue.record("没有创建拖动图标"); return }
+        func event(_ type: NSEvent.EventType, at point: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil), modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        }
+        let targetPoint = target.convert(NSPoint(x: target.bounds.minX + 2, y: target.bounds.midY), to: view)
+        view.beginTileDrag(source, event: event(.leftMouseDragged, at: targetPoint))
+        let preview = store.displayedLayout
+        #expect(preview.pages[0].items == [.app("b"), .app("a"), .app("c")])
+        let blank = NSPoint(x: view.bounds.midX, y: 5)
+        view.moveTileDrag(event(.leftMouseDragged, at: blank))
+        view.endTileDrag(event(.leftMouseUp, at: blank))
         for _ in 0..<100 where store.dragPreviewActive { await Task.yield() }
         #expect(store.state.layout == preview)
     }

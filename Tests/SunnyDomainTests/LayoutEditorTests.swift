@@ -49,6 +49,13 @@ struct LayoutEditorTests {
         #expect(updated.folders[0].appIDs == ["b", "a"])
     }
 
+    @Test func folderMoveKeepsDestinationWhenSourcePageBecomesEmpty() {
+        let folder = AppFolder(id: "folder", name: "Tools", pages: [["a"], ["b", "c"], ["d"]])
+        let layout = LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder)])])
+        let updated = LayoutEditor.moveIntoFolder("app:a", folderID: "folder", page: 2, before: "d", in: layout)
+        #expect(updated.folders[0].appIDs == ["b", "c", "a", "d"])
+    }
+
     @Test func invalidDataAndFutureSchemaAreRejected() {
         let duplicated = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.app("a"), .app("a")])]), catalog: apps)
         #expect(throws: SunnyError.invalidLayout) { try LayoutEditor.validate(duplicated) }
