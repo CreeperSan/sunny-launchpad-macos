@@ -68,6 +68,8 @@ import SunnyDomain
     public var hotkeyError: String?
     public var presentationID = UUID()
     public var dismiss: () -> Void = {}
+    /// 启动失败时重新显示启动器，确保错误提示可见。
+    public var launchFailed: () -> Void = {}
     public var openSettings: () -> Void = {}
     public var preferencesChanged: (Preferences) -> Void = { _ in }
     private let catalogService: any ApplicationCatalog
@@ -192,7 +194,7 @@ import SunnyDomain
         if updated != state { await commit(updated) }
     }
 
-    public func activate(_ item: LayoutItem) {
+    public func activate(_ item: LayoutItem, willLaunch: () -> Void = {}) {
         switch item {
         case .folder(let folder):
             guard folderID == nil else { return }
@@ -209,9 +211,12 @@ import SunnyDomain
         case .app(let id):
             guard !organizing, let app = app(id) else { return }
             if let folder, !folder.appIDs.contains(id) { return }
+            // 点击反馈和窗口退出无需等待系统完成应用启动。
+            willLaunch()
+            dismiss()
             Task {
-                do { try await launcher.launch(app); dismiss() }
-                catch { report(error) }
+                do { try await launcher.launch(app) }
+                catch { report(error); launchFailed() }
             }
         }
     }

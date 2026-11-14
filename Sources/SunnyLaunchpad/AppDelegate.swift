@@ -32,6 +32,7 @@ import SunnyPresentation
         NativeLauncherView.configureIconCache(directory: dataDirectory.appendingPathComponent("IconCache", isDirectory: true))
         if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let image = NSImage(contentsOf: url) { NSApp.applicationIconImage = image }
         store.dismiss = { [weak self] in self?.hideLauncher() }
+        store.launchFailed = { [weak self] in self?.showLauncher() }
         store.openSettings = { [weak self] in self?.showSettings() }
         store.preferencesChanged = { [weak self] preferences in self?.applyPreferences(preferences) }
         hotKey.action = { [weak self] in self?.toggleLauncher() }
@@ -163,7 +164,9 @@ import SunnyPresentation
     @objc private func showSettings() {
         hideLauncher()
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 680), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 680), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
             window.isReleasedWhenClosed = false
             window.contentMinSize = NSSize(width: 820, height: 620)
             window.contentView = NativeSettingsView(store: store, dataDirectory: dataDirectory)

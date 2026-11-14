@@ -11,6 +11,17 @@ import SunnyDomain
     private let sidebar = NativeSettingsStack()
     private let scroll = NSScrollView()
     private let form = NativeSettingsStack()
+    private var settingGroup: NativeSettingsStack?
+    private let sidebarFooter = NSVisualEffectView()
+    private let sidebarBrand = NSTextField(labelWithString: "Sunny Launchpad")
+    private let sidebarBrandIcon = NSImageView()
+    private let sidebarDivider = NSBox()
+    private let sidebarWidth: CGFloat = 268
+    private let sidebarInset: CGFloat = 10
+    private let sidebarTop: CGFloat = 58
+    private let sidebarRowHeight: CGFloat = 34
+    private let sidebarFooterHeight: CGFloat = 48
+    private let formInset: CGFloat = 32
     private var section = "general"
     private var actions: [NativeControlAction] = []
     private var key = ""
@@ -22,15 +33,24 @@ import SunnyDomain
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        sidebarBackground.material = .sidebar; sidebarBackground.blendingMode = .withinWindow; sidebarBackground.state = .active
+        sidebarBackground.material = .sidebar; sidebarBackground.blendingMode = .behindWindow; sidebarBackground.state = .active
         addSubview(sidebarBackground)
-        sidebar.orientation = .vertical; sidebar.alignment = .leading; sidebar.spacing = 6
+        sidebar.orientation = .vertical; sidebar.alignment = .leading; sidebar.spacing = 0
         addSubview(sidebar)
+        // 参考系统应用：底部独立材质栏承载应用标识，导航顶部不再插入品牌标题。
+        sidebarFooter.material = .sidebar; sidebarFooter.blendingMode = .withinWindow; sidebarFooter.state = .active
+        addSubview(sidebarFooter)
+        sidebarBrand.font = .systemFont(ofSize: 14, weight: .medium)
+        sidebarBrandIcon.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: nil)
+        sidebarBrandIcon.contentTintColor = .secondaryLabelColor
+        sidebarFooter.addSubview(sidebarBrandIcon); sidebarFooter.addSubview(sidebarBrand)
+        sidebarDivider.boxType = .separator
+        addSubview(sidebarDivider)
         scroll.hasVerticalScroller = true; scroll.drawsBackground = false
         scroll.borderType = .noBorder
         addSubview(scroll)
         form.orientation = .vertical; form.alignment = .leading; form.spacing = 14
-        form.edgeInsets = NSEdgeInsets(top: 32, left: 32, bottom: 36, right: 32)
+        form.edgeInsets = NSEdgeInsets(top: 64, left: formInset, bottom: 36, right: formInset)
         scroll.documentView = form
         form.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([form.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)])
@@ -41,9 +61,14 @@ import SunnyDomain
     public override var isFlipped: Bool { true }
     public override func layout() {
         super.layout()
-        sidebarBackground.frame = NSRect(x: 0, y: 0, width: 220, height: bounds.height)
-        sidebar.frame = NSRect(x: 18, y: 28, width: 192, height: bounds.height - 56)
-        scroll.frame = NSRect(x: 220, y: 0, width: max(400, bounds.width - 220), height: bounds.height)
+        sidebarBackground.frame = NSRect(x: 0, y: 0, width: sidebarWidth, height: bounds.height)
+        // 侧栏只占用实际导航高度，避免 StackView 把少量导航项拉伸到整个窗口。
+        sidebar.frame = NSRect(x: sidebarInset, y: sidebarTop, width: sidebarWidth - sidebarInset * 2, height: sidebarRowHeight * 5)
+        sidebarFooter.frame = NSRect(x: 0, y: bounds.height - sidebarFooterHeight, width: sidebarWidth, height: sidebarFooterHeight)
+        sidebarBrandIcon.frame = NSRect(x: 14, y: 12, width: 24, height: 24)
+        sidebarBrand.frame = NSRect(x: 46, y: 14, width: sidebarWidth - 58, height: 20)
+        sidebarDivider.frame = NSRect(x: 0, y: bounds.height - sidebarFooterHeight, width: sidebarWidth, height: 1)
+        scroll.frame = NSRect(x: sidebarWidth, y: 0, width: max(0, bounds.width - sidebarWidth), height: bounds.height)
     }
     private func observe() {
         withObservationTracking {
@@ -59,28 +84,18 @@ import SunnyDomain
         actions.removeAll()
         for view in sidebar.arrangedSubviews { sidebar.removeArrangedSubview(view); view.removeFromSuperview() }
         for view in form.arrangedSubviews { form.removeArrangedSubview(view); view.removeFromSuperview() }
-        let brand = NSTextField(labelWithString: "☀︎ Sunny Launchpad")
-        brand.font = .systemFont(ofSize: 18, weight: .semibold)
-        sidebar.addArrangedSubview(brand)
         let sections = [("general", "gearshape"), ("appearance", "paintpalette"), ("interaction", "square.grid.3x3"), ("import", "tray.and.arrow.down"), ("about", "info.circle")]
         for (id, symbol) in sections {
-            let button = makeButton(store.text(id)) { [weak self] in
+            let target = NativeControlAction { [weak self] in
                 guard let self, self.section != id else { return }
                 self.section = id; self.key = ""; self.render()
                 self.scroll.contentView.scroll(to: .zero); self.scroll.reflectScrolledClipView(self.scroll.contentView)
             }
-            button.bezelStyle = .inline
-            button.alignment = .left
-            button.font = .systemFont(ofSize: 13, weight: section == id ? .semibold : .regular)
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-            button.imagePosition = .imageLeading
-            button.wantsLayer = true
-            button.layer?.cornerRadius = 8
-            button.layer?.backgroundColor = section == id ? NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor : NSColor.clear.cgColor
-            button.contentTintColor = section == id ? .controlAccentColor : .labelColor
+            actions.append(target)
+            let button = NativeSettingsSidebarButton(title: store.text(id), symbol: symbol, selected: section == id, target: target)
             sidebar.addArrangedSubview(button)
-            button.widthAnchor.constraint(equalToConstant: 192).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 40).isActive = true
+            button.widthAnchor.constraint(equalToConstant: sidebarWidth - sidebarInset * 2).isActive = true
+            button.heightAnchor.constraint(equalToConstant: sidebarRowHeight).isActive = true
         }
         title(store.text(section))
         if store.readOnly { label(store.text("readOnly")) }
@@ -102,9 +117,32 @@ import SunnyDomain
     }
     private func title(_ text: String) { let field = NSTextField(labelWithString: text); field.font = .systemFont(ofSize: 25, weight: .bold); add(field); form.setCustomSpacing(24, after: field) }
     private func label(_ text: String) { let field = NSTextField(wrappingLabelWithString: text); field.font = .systemFont(ofSize: 13); field.isSelectable = true; add(field) }
+    /// 设置项使用圆角分组，文字与控件仍由系统适配外观和辅助功能。
+    private func beginSettingGroup() {
+        let box = NSBox()
+        box.boxType = .custom; box.borderWidth = 0; box.cornerRadius = 14
+        box.fillColor = .controlBackgroundColor
+        box.contentViewMargins = .zero
+        let stack = NativeSettingsStack()
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
+        box.contentView?.addSubview(stack)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        if let content = box.contentView {
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: content.leadingAnchor), stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                stack.topAnchor.constraint(equalTo: content.topAnchor), stack.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+            ])
+        }
+        add(box)
+        settingGroup = stack
+    }
+    private func endSettingGroup() { settingGroup = nil }
     private func add(_ view: NSView) {
-        form.addArrangedSubview(view)
-        view.widthAnchor.constraint(equalTo: form.widthAnchor, constant: -64).isActive = true
+        let container = settingGroup ?? form
+        container.addArrangedSubview(view)
+        let inset = settingGroup == nil ? formInset * 2 : CGFloat(36)
+        view.widthAnchor.constraint(equalTo: container.widthAnchor, constant: -inset).isActive = true
     }
     private func makeButton(_ title: String, action: @escaping () -> Void) -> NSButton {
         let target = NativeControlAction(action)
@@ -113,6 +151,8 @@ import SunnyDomain
     }
     private func button(_ key: String, action: @escaping () -> Void) { let control = makeButton(store.text(key), action: action); control.isEnabled = store.canEdit; add(control) }
     private func toggle(_ key: String, path: WritableKeyPath<Preferences, Bool>) {
+        beginSettingGroup()
+        defer { endSettingGroup() }
         let control = NSButton(checkboxWithTitle: store.text(key), target: nil, action: nil)
         control.state = store.preferences[keyPath: path] ? .on : .off
         let target = NativeControlAction { [weak self, weak control] in
@@ -123,6 +163,8 @@ import SunnyDomain
         actions.append(target); control.target = target; control.action = #selector(NativeControlAction.invokeAction); control.isEnabled = store.canEdit; add(control)
     }
     private func picker<Value: Equatable>(_ key: String, values: [Value], names: [String], path: WritableKeyPath<Preferences, Value>) {
+        beginSettingGroup()
+        defer { endSettingGroup() }
         label(store.text(key))
         if values.count < 5 {
             for (index, name) in names.enumerated() {
@@ -159,6 +201,7 @@ import SunnyDomain
         picker("theme", values: Theme.allCases, names: Theme.allCases.map { store.text($0.rawValue) }, path: \.theme)
         toggle("reduceMotion", path: \.reduceMotion)
         numeric("backgroundBlur", value: store.preferences.interaction.backgroundBlur, range: 0...60, step: 1) { [weak store] value in Task { await store?.setPreferences { $0.interaction.backgroundBlur = value } } }
+        beginSettingGroup()
         label(store.text("dimColor"))
         let color = NSColorWell()
         let rgb = UInt32(store.preferences.interaction.dimColorHex, radix: 16) ?? 0
@@ -171,9 +214,12 @@ import SunnyDomain
         actions.append(action); color.target = action; color.action = #selector(NativeControlAction.invokeAction); color.isEnabled = store.canEdit
         color.heightAnchor.constraint(equalToConstant: 32).isActive = true
         add(color)
+        endSettingGroup()
         numeric("dimOpacity", value: store.preferences.interaction.dimOpacity, range: 0...1, step: 0.01, multiplier: 100) { [weak store] value in Task { await store?.setPreferences { $0.interaction.dimOpacity = value } } }
     }
     private func numeric(_ key: String, value: Double, range: ClosedRange<Double>, step: Double, multiplier: Double = 1, change: @escaping (Double) -> Void) {
+        beginSettingGroup()
+        defer { endSettingGroup() }
         let row = NativeNumericControl(title: store.text(key), value: value, range: range, step: step, multiplier: multiplier, change: change)
         row.heightAnchor.constraint(equalToConstant: 64).isActive = true
         add(row)
@@ -228,6 +274,46 @@ import SunnyDomain
             if confirm.runModal() == .alertFirstButtonReturn { Task { await self.store.restore(from: url) } }
         }
         button("openData") { [weak self] in if let self { NSWorkspace.shared.open(self.dataDirectory) } }
+    }
+}
+
+/// 导航图标与文字分别着色；使用无边框按钮保留键盘激活和辅助功能语义。
+@MainActor private final class NativeSettingsSidebarButton: NSButton {
+    private let icon = NSImageView()
+    private let caption = NSTextField(labelWithString: "")
+    private let selected: Bool
+    private let rowRadius: CGFloat = 9
+    private let iconSize: CGFloat = 20
+
+    init(title: String, symbol: String, selected: Bool, target: NativeControlAction) {
+        self.selected = selected
+        super.init(frame: .zero)
+        self.title = ""; self.target = target; action = #selector(NativeControlAction.invokeAction)
+        isBordered = false
+        setButtonType(.momentaryChange)
+        setAccessibilityLabel(title)
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: iconSize, weight: .regular))
+        icon.imageScaling = .scaleProportionallyDown
+        icon.contentTintColor = selected ? .white : .systemBlue
+        caption.stringValue = title
+        caption.font = .systemFont(ofSize: 14, weight: selected ? .semibold : .regular)
+        caption.textColor = selected ? .white : .labelColor
+        // 子视图不接收点击，整行均由按钮处理。
+        addSubview(icon); addSubview(caption)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var isFlipped: Bool { true }
+    override func layout() {
+        super.layout()
+        icon.frame = NSRect(x: 10, y: (bounds.height - iconSize) / 2, width: iconSize, height: iconSize)
+        caption.frame = NSRect(x: 38, y: (bounds.height - 20) / 2, width: max(0, bounds.width - 48), height: 20)
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) == nil ? nil : self }
+    override func draw(_ dirtyRect: NSRect) {
+        if selected {
+            NSColor.systemBlue.setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: rowRadius, yRadius: rowRadius).fill()
+        }
     }
 }
 

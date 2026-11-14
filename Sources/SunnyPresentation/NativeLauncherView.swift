@@ -26,6 +26,8 @@ import SunnyDomain
     private static let dragPageDelay: Duration = .milliseconds(650)
     /// 拖到文件夹外后稍作停留，避免经过边界时误关闭。
     private static let dragFolderCloseDelay: Duration = .milliseconds(650)
+    /// 启动应用时图标以自身中心放大，随窗口一起淡出。
+    private static let launchIconScale: CGFloat = 1.4
     private let store: LaunchpadStore
     private let wallpaper = NativeImageSurface()
     private let tint = NSView()
@@ -273,7 +275,8 @@ import SunnyDomain
         folderBackground.layer?.backgroundColor = NSColor(white: dark ? 0.16 : 0.88, alpha: 0.94).cgColor
         folder.layer?.backgroundColor = NSColor.clear.cgColor
         if search.placeholderString != store.text("search"), let cell = search.cell as? NSTextFieldCell {
-            cell.placeholderAttributedString = NSAttributedString(string: store.text("search"), attributes: [.foregroundColor: NSColor.white.withAlphaComponent(0.7)])
+            // 占位文字显式沿用输入字体，避免焦点切换时字号发生变化。
+            cell.placeholderAttributedString = NSAttributedString(string: store.text("search"), attributes: [.foregroundColor: NSColor.white.withAlphaComponent(0.7), .font: search.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)])
         }
         if search.stringValue != store.query { search.stringValue = store.query }
         loading.stringValue = store.state.catalog.isEmpty ? store.text(store.catalogLoading ? "loading" : "empty") : ""
@@ -827,7 +830,26 @@ import SunnyDomain
     func activate(_ item: LayoutItem) {
         guard store.folderID == nil || store.visibleItems.contains(where: { $0.id == item.id }) else { return }
         if case .folder = item, let tile = tiles[item.id] { folderSource = tile.icon.convert(tile.icon.bounds, to: self) }
-        store.activate(item)
+        store.activate(item) { [weak self] in self?.animateLaunchingIcon(item) }
+    }
+
+    /// 仅使用临时动画，不修改图标的模型状态，重新打开时仍保持原样。
+    private func animateLaunchingIcon(_ item: LayoutItem) {
+        guard transitionDuration > 0, let tile = (store.folderID == nil ? tiles : folderTiles)[item.id], let layer = tile.icon.layer else { return }
+        let scale = CABasicAnimation(keyPath: "transform")
+        scale.fromValue = NSValue(caTransform3D: layer.transform)
+        scale.toValue = NSValue(caTransform3D: LayerAnimation.centeredScale(x: Self.launchIconScale, y: Self.launchIconScale, size: layer.bounds.size))
+        scale.duration = transitionDuration
+        scale.timingFunction = LayerAnimation.timing
+        requestRefreshRate(scale)
+        layer.add(scale, forKey: "launchScale")
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = layer.presentation()?.opacity ?? layer.opacity
+        fade.toValue = Float(0)
+        fade.duration = transitionDuration
+        fade.timingFunction = LayerAnimation.timing
+        requestRefreshRate(fade)
+        layer.add(fade, forKey: "launchFade")
     }
 
     func contextMenu(for item: LayoutItem) -> NSMenu {

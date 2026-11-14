@@ -6,6 +6,20 @@ import SunnyDomain
 @testable import SunnyPresentation
 
 @MainActor struct PageGestureTests {
+    @Test func launchDismissesBeforeSystemLaunchCompletes() async {
+        let fixture = GestureFixture()
+        let spy = GestureLauncherSpy()
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: spy)
+        await store.prepare()
+        var events: [String] = []
+        store.dismiss = { events.append("dismiss") }
+        store.activate(.app("0")) { events.append("animation") }
+        #expect(events == ["animation", "dismiss"])
+        #expect(spy.launched.isEmpty)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(spy.launched == ["0"])
+    }
+
     @Test func searchOnlyLaunchesAfterExplicitReturn() async {
         let fixture = GestureFixture()
         let spy = GestureLauncherSpy()
@@ -22,6 +36,8 @@ import SunnyDomain
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = view
         view.layoutSubtreeIfNeeded()
+        let placeholderFont = field.placeholderAttributedString?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        #expect(placeholderFont == field.font)
         #expect(window.makeFirstResponder(field))
         #expect(field.currentEditor()?.isEditable == true)
         #expect(field.cell?.usesSingleLineMode == true)
