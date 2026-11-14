@@ -20,8 +20,26 @@ struct PresentationTests {
     func gridFitsScaledAndPortraitDisplays(size: CGSize) {
         let metrics = LauncherMetrics(availableSize: size)
         #expect(metrics.cellHeight * CGFloat(LaunchpadRules.rows) + LauncherMetrics.verticalChrome <= size.height)
-        #expect(metrics.iconSize + 43 <= metrics.cellHeight)
-        #expect(metrics.iconSize + 16 <= metrics.tileWidth)
-        #expect(metrics.iconSize <= 88)
+        #expect(metrics.iconSize + (metrics.cellHeight < 70 ? 26 : 43) <= metrics.cellHeight)
+        #expect(metrics.iconSize + 8 <= metrics.tileWidth)
+        #expect(metrics.iconSize > 0)
     }
+    @Test func largerScreensGrowIconsAndSpreadGrid() {
+        let laptop = LauncherMetrics(availableSize: CGSize(width: 1512, height: 850))
+        let desktop = LauncherMetrics(availableSize: CGSize(width: 2560, height: 1440))
+        #expect(desktop.iconSize > laptop.iconSize)
+        #expect(desktop.tileWidth > laptop.tileWidth)
+    }
+
+    @Test func denseLayoutStillFitsSmallScreen() {
+        var configuration = InteractionPreferences()
+        configuration.rows = 8
+        configuration.columns = 12
+        configuration.iconScale = 1.5
+        configuration.spacingScale = 0.5
+        let metrics = LauncherMetrics(availableSize: CGSize(width: 800, height: 650), configuration: configuration)
+        #expect(metrics.iconSize + 21 <= metrics.cellHeight)
+        #expect(metrics.iconSize + 8 <= metrics.tileWidth)
+    }
+
 }

@@ -2,7 +2,7 @@
 # 构建自包含 .app；本地 ad-hoc 签名仅供开发验证，发布需 Developer ID 与公证。
 set -euo pipefail
 cd "$(dirname "$0")/.."
-configuration="${1:-debug}"
+configuration="${1:-release}"
 export CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/module-cache"
 swift build --disable-sandbox --cache-path .build/cache -c "$configuration"

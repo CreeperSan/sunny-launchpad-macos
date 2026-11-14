@@ -128,7 +128,21 @@ public struct Preferences: Codable, Equatable, Sendable {
     public var hotKeyEnabled = true
     public var rememberPage = true
     public var reduceMotion = false
+    public var interaction = InteractionPreferences()
     public init() {}
+
+    private enum CodingKeys: String, CodingKey { case style, theme, language, hotKeyEnabled, rememberPage, reduceMotion, interaction }
+    /// 老版本没有交互配置时补齐默认值，不重置用户布局与其他偏好。
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        style = try values.decodeIfPresent(InterfaceStyle.self, forKey: .style) ?? .liquidGlass
+        theme = try values.decodeIfPresent(Theme.self, forKey: .theme) ?? .system
+        language = try values.decodeIfPresent(AppLanguage.self, forKey: .language) ?? .system
+        hotKeyEnabled = try values.decodeIfPresent(Bool.self, forKey: .hotKeyEnabled) ?? true
+        rememberPage = try values.decodeIfPresent(Bool.self, forKey: .rememberPage) ?? true
+        reduceMotion = try values.decodeIfPresent(Bool.self, forKey: .reduceMotion) ?? false
+        interaction = try values.decodeIfPresent(InteractionPreferences.self, forKey: .interaction) ?? InteractionPreferences()
+    }
 }
 
 /// 单个版本化状态文件保证偏好和布局提交的一致性。
@@ -137,6 +151,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
     public var layout: LaunchpadLayout
     public var catalog: [ApplicationRecord]
     public var preferences: Preferences
+    public var catalogUpdatedAt: Date?
 
     public init(layout: LaunchpadLayout = LaunchpadLayout(), catalog: [ApplicationRecord] = [], preferences: Preferences = Preferences()) {
         self.layout = layout

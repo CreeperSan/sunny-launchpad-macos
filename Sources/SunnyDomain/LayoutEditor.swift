@@ -9,11 +9,11 @@ public enum LayoutEditor {
         let placedIDs = state.layout.appIDs
         let pageIDs = state.layout.pages.map(\.id)
         let folderIDs = state.layout.folders.map(\.id)
-        guard !pageIDs.isEmpty, state.catalog.count <= LaunchpadRules.maximumNodes,
+        guard state.preferences.interaction.isValid, !pageIDs.isEmpty, state.catalog.count <= LaunchpadRules.maximumNodes,
               Set(appIDs).count == appIDs.count, Set(placedIDs).count == placedIDs.count,
               Set(placedIDs).isSubset(of: Set(appIDs)), Set(pageIDs).count == pageIDs.count,
               Set(folderIDs).count == folderIDs.count,
-              state.layout.pages.allSatisfy({ $0.items.count <= LaunchpadRules.pageCapacity }),
+              state.layout.pages.allSatisfy({ $0.items.count <= state.preferences.interaction.capacity }),
               state.layout.folders.allSatisfy({ !$0.appIDs.isEmpty && !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.pages.allSatisfy { !$0.isEmpty && $0.count <= LaunchpadRules.folderCapacity } })
         else { throw SunnyError.invalidLayout }
     }
@@ -31,7 +31,7 @@ public enum LayoutEditor {
         }
         let added = discovered.filter { !previous.contains($0.id) }
         result.catalog.append(contentsOf: added)
-        for app in added { append(.app(app.id), to: &result.layout) }
+        for app in added { append(.app(app.id), to: &result.layout, capacity: state.preferences.interaction.capacity) }
         return result
     }
 
@@ -42,18 +42,18 @@ public enum LayoutEditor {
     }
 
     /// 移动应用或整组到主页面；显式保留用户的页边界，只将溢出项顺延。
-    public static func move(_ itemID: String, toPage pageID: String, before targetID: String?, in layout: LaunchpadLayout) -> LaunchpadLayout {
+    public static func move(_ itemID: String, toPage pageID: String, before targetID: String?, in layout: LaunchpadLayout, capacity: Int = LaunchpadRules.pageCapacity) -> LaunchpadLayout {
         guard itemID != targetID, layout.pages.contains(where: { $0.id == pageID }) else { return layout }
         var result = layout
         guard let item = remove(itemID, from: &result), let pageIndex = result.pages.firstIndex(where: { $0.id == pageID }) else { return layout }
         let index = targetID.flatMap { target in result.pages[pageIndex].items.firstIndex { $0.id == target } } ?? result.pages[pageIndex].items.count
         result.pages[pageIndex].items.insert(item, at: index)
-        normalize(&result)
+        normalize(&result, capacity: capacity)
         return result
     }
 
     /// 中心落点创建或加入文件夹；已有文件夹不能被装进另一个文件夹。
-    public static func group(_ sourceID: String, onto targetID: String, name: String, in layout: LaunchpadLayout) -> LaunchpadLayout {
+    public static func group(_ sourceID: String, onto targetID: String, name: String, in layout: LaunchpadLayout, capacity: Int = LaunchpadRules.pageCapacity) -> LaunchpadLayout {
         guard sourceID != targetID, sourceID.hasPrefix("app:") else { return layout }
         var result = layout
         guard case .app(let appID) = remove(sourceID, from: &result) else { return layout }
@@ -67,14 +67,14 @@ public enum LayoutEditor {
                 folder.pages[folder.pages.count - 1].append(appID)
                 result.pages[page].items[index] = .folder(folder)
             }
-            normalize(&result)
+            normalize(&result, capacity: capacity)
             return result
         }
         return layout
     }
 
     /// 文件夹内部排序支持跨内部页面，保留其他页面的顺序。
-    public static func moveIntoFolder(_ sourceID: String, folderID: String, page: Int, before target: String?, in layout: LaunchpadLayout) -> LaunchpadLayout {
+    public static func moveIntoFolder(_ sourceID: String, folderID: String, page: Int, before target: String?, in layout: LaunchpadLayout, capacity: Int = LaunchpadRules.pageCapacity) -> LaunchpadLayout {
         guard sourceID.hasPrefix("app:"), sourceID != target.map({ "app:\($0)" }) else { return layout }
         var result = layout
         // 先记录目标文件夹，处理移动唯一子项时 remove 自动清理空文件夹的情况。
@@ -88,11 +88,11 @@ public enum LayoutEditor {
             folder.pages[pageIndex].insert(appID, at: index)
             folder.pages = chunks(folder.appIDs, size: LaunchpadRules.folderCapacity)
         }
-        normalize(&result)
+        normalize(&result, capacity: capacity)
         return result
     }
 
-    public static func renameFolder(_ id: String, name: String, in layout: LaunchpadLayout) -> LaunchpadLayout {
+    public static func renameFolder(_ id: String, name: String, in layout: LaunchpadLayout, capacity: Int = LaunchpadRules.pageCapacity) -> LaunchpadLayout {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return layout }
         var result = layout
@@ -106,9 +106,15 @@ public enum LayoutEditor {
         return stride(from: 0, to: values.count, by: size).map { Array(values[$0..<min($0 + size, values.count)]) }
     }
 
-    public static func append(_ item: LayoutItem, to layout: inout LaunchpadLayout) {
-        if layout.pages.isEmpty || layout.pages.last!.items.count >= LaunchpadRules.pageCapacity { layout.pages.append(LayoutPage()) }
+    public static func append(_ item: LayoutItem, to layout: inout LaunchpadLayout, capacity: Int = LaunchpadRules.pageCapacity) {
+        if layout.pages.isEmpty || layout.pages.last!.items.count >= capacity { layout.pages.append(LayoutPage()) }
         layout.pages[layout.pages.count - 1].items.append(item)
+    }
+
+    /// 修改行列时保留线性顺序与文件夹身份，按新容量重新分配主页面。
+    public static func repaginate(_ layout: LaunchpadLayout, capacity: Int) -> LaunchpadLayout {
+        let pages = chunks(layout.pages.flatMap(\.items), size: capacity).map { LayoutPage(items: $0) }
+        return LaunchpadLayout(pages: pages.isEmpty ? [LayoutPage()] : pages)
     }
 
     private static func updateFolder(_ id: String, in layout: inout LaunchpadLayout, change: (inout AppFolder) -> Void) {
@@ -139,11 +145,18 @@ public enum LayoutEditor {
         return nil
     }
 
-    private static func normalize(_ layout: inout LaunchpadLayout) {
+    private static func normalize(_ layout: inout LaunchpadLayout, capacity: Int) {
+        // 移出后只剩一个应用的文件夹解体，动画由展示层的稳定应用 ID 承接。
+        for index in layout.pages.indices {
+            layout.pages[index].items = layout.pages[index].items.map { item in
+                if case .folder(let folder) = item, folder.appIDs.count == 1 { return .app(folder.appIDs[0]) }
+                return item
+            }
+        }
         var page = 0
         while page < layout.pages.count {
-            let overflow = Array(layout.pages[page].items.dropFirst(LaunchpadRules.pageCapacity))
-            layout.pages[page].items = Array(layout.pages[page].items.prefix(LaunchpadRules.pageCapacity))
+            let overflow = Array(layout.pages[page].items.dropFirst(capacity))
+            layout.pages[page].items = Array(layout.pages[page].items.prefix(capacity))
             if !overflow.isEmpty {
                 if page + 1 == layout.pages.count { layout.pages.append(LayoutPage()) }
                 layout.pages[page + 1].items.insert(contentsOf: overflow, at: 0)

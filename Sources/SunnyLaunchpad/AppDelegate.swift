@@ -1,6 +1,6 @@
 // 组装根：只在这里选择基础设施实现，窗口生命周期与用户数据路径集中管理。
 import AppKit
-import SwiftUI
+import QuartzCore
 import SunnyDomain
 import SunnyInfrastructure
 import SunnyPresentation
@@ -9,26 +9,60 @@ import SunnyPresentation
     private let dataDirectory = JSONWorkspaceRepository.defaultDirectory
     private lazy var store = LaunchpadStore(catalog: MacApplicationCatalog(), repository: JSONWorkspaceRepository(directory: dataDirectory), importer: LegacyLaunchpadImporter(), launcher: MacApplicationLauncher())
     private var launcherWindow: LauncherWindow?
+    private var launcherView: NativeLauncherView?
     private var settingsWindow: NSWindow?
     private var statusItem: NSStatusItem?
     private let hotKey = GlobalHotKey()
+    private let directoryWatcher = ApplicationDirectoryWatcher()
     private var ready = false
+    private var closing = false
+    private var transitionTask: Task<Void, Never>?
+    private var savedPresentation: NSApplication.PresentationOptions?
+    private var appliedCover: Bool?
+    private var appliedBlur: Double?
+    private let wallpaperRenderer = WallpaperRenderer()
+    private var wallpaperTask: Task<Void, Never>?
     private var launcherScreenNumber: NSNumber?
+    private var configurationKey = ""
+    private var wallpaperCache: [String: NSImage] = [:]
+    private var preparationTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(.accessory)
+        NativeLauncherView.configureIconCache(directory: dataDirectory.appendingPathComponent("IconCache", isDirectory: true))
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let image = NSImage(contentsOf: url) { NSApp.applicationIconImage = image }
         store.dismiss = { [weak self] in self?.hideLauncher() }
         store.openSettings = { [weak self] in self?.showSettings() }
         store.preferencesChanged = { [weak self] preferences in self?.applyPreferences(preferences) }
         hotKey.action = { [weak self] in self?.toggleLauncher() }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: "Sunny Launchpad")
+        item.button?.target = self
+        item.button?.action = #selector(statusItemClicked(_:))
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusItem = item
         NotificationCenter.default.addObserver(self, selector: #selector(screenParametersChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(systemLocaleChanged), name: NSLocale.currentLocaleDidChangeNotification, object: nil)
         rebuildMenus()
         ready = true
         showLauncher()
+        Task { [self] in
+            await Task.yield()
+            directoryWatcher.onChange = { [weak self] in
+                guard let self else { return }
+                self.directoryWatcher.start()
+                self.store.markCatalogDirty()
+                if self.launcherWindow?.isVisible == true { Task { await self.store.refresh() } }
+            }
+            directoryWatcher.start()
+        }
+        if CommandLine.arguments.contains("--performance-check") {
+            Task {
+                try? await Task.sleep(for: .seconds(1))
+                if let native = launcherWindow?.contentView as? NativeLauncherView { await native.runPerformanceCheck() }
+                if CommandLine.arguments.contains("--quit-after-performance-check") { NSApp.terminate(nil) }
+            }
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -37,11 +71,13 @@ import SunnyPresentation
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func applicationWillTerminate(_ notification: Notification) { hotKey.stop() }
+    func applicationWillTerminate(_ notification: Notification) { hotKey.stop(); directoryWatcher.stop(); restorePresentation() }
     func applicationDidResignActive(_ notification: Notification) { hideLauncher() }
+    func applicationDidBecomeActive(_ notification: Notification) { applyPresentation() }
 
     /// 不创建原生全屏 Space；覆盖鼠标所在显示器，保留普通桌面切换方式。
     @objc private func showLauncher() {
+        if launcherWindow?.isVisible == true && !closing { launcherWindow?.makeKeyAndOrderFront(nil); return }
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
         guard let screen else { return }
         let window: LauncherWindow
@@ -56,13 +92,69 @@ import SunnyPresentation
             window.delegate = self
             launcherWindow = window
         }
-        configure(window, on: screen)
+        closing = false
+        transitionTask?.cancel()
+        window.animationBehavior = .none
+        // 窗口先以轻量空视图进入当前 Space；布局构建和合成动画在随后执行。
+        window.setFrame(screen.frame, display: false)
+        window.contentView = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+        window.level = store.preferences.interaction.coverSystemBars ? NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1) : .normal
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        Task { await store.prepare() }
+        window.displayIfNeeded()
+        CATransaction.flush()
+        applyPresentation()
+        preparationTask?.cancel()
+        preparationTask = Task { await store.prepare() }
+        transitionTask = Task {
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            configure(window, on: screen)
+            store.revealProgress = 0
+            (window.contentView as? NativeLauncherView)?.prepareReveal()
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            applyPresentation()
+            store.revealProgress = 1
+            (window.contentView as? NativeLauncherView)?.performReveal()
+        }
     }
 
-    @objc private func hideLauncher() { launcherWindow?.orderOut(nil) }
+    private var windowMotion: Double? {
+        store.preferences.reduceMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || store.preferences.interaction.windowAnimation == .none ? nil : store.preferences.interaction.windowDuration
+    }
+
+    @objc private func hideLauncher() {
+        guard !closing, launcherWindow?.isVisible == true else { return }
+        closing = true
+        transitionTask?.cancel()
+        store.cancelDrag()
+        let duration = windowMotion == nil ? 0 : store.preferences.interaction.windowDuration
+        store.revealProgress = 0
+        (launcherWindow?.contentView as? NativeLauncherView)?.performReveal()
+        transitionTask = Task {
+            try? await Task.sleep(for: .seconds(duration))
+            guard !Task.isCancelled else { return }
+            launcherWindow?.orderOut(nil)
+            restorePresentation()
+            closing = false
+        }
+    }
+
+    private func applyPresentation() {
+        guard launcherWindow?.isVisible == true else { return }
+        if store.preferences.interaction.coverSystemBars {
+            if savedPresentation == nil { savedPresentation = NSApp.presentationOptions }
+            NSApp.presentationOptions = [.hideDock, .hideMenuBar]
+            launcherWindow?.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1)
+        } else { restorePresentation() }
+    }
+
+    private func restorePresentation() {
+        if let savedPresentation { NSApp.presentationOptions = savedPresentation }
+        savedPresentation = nil
+        launcherWindow?.level = .normal
+    }
     @objc private func toggleLauncher() {
         if launcherWindow?.isVisible == true { hideLauncher() } else { showLauncher() }
     }
@@ -72,7 +164,8 @@ import SunnyPresentation
         if settingsWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 680), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: SettingsView(store: store, dataDirectory: dataDirectory))
+            window.contentMinSize = NSSize(width: 820, height: 620)
+            window.contentView = NativeSettingsView(store: store, dataDirectory: dataDirectory)
             window.center()
             settingsWindow = window
         }
@@ -99,9 +192,32 @@ import SunnyPresentation
         launcherScreenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
         let frame = screen.frame
         let visible = screen.visibleFrame.intersection(frame)
-        let insets = EdgeInsets(top: max(0, frame.maxY - visible.maxY), leading: max(0, visible.minX - frame.minX), bottom: max(0, visible.minY - frame.minY), trailing: max(0, frame.maxX - visible.maxX))
-        let wallpaper = NSWorkspace.shared.desktopImageURL(for: screen).flatMap(NSImage.init(contentsOf:))
-        window.contentView = NSHostingView(rootView: LauncherView(store: store, wallpaper: wallpaper, screenInsets: insets))
+        let normalInsets = NSEdgeInsets(top: max(0, frame.maxY - visible.maxY), left: max(0, visible.minX - frame.minX), bottom: max(0, visible.minY - frame.minY), right: max(0, frame.maxX - visible.maxX))
+        let insets = store.preferences.interaction.coverSystemBars ? NSEdgeInsets(top: screen.safeAreaInsets.top, left: 0, bottom: 0, right: 0) : normalInsets
+        let wallpaperURL = NSWorkspace.shared.desktopImageURL(for: screen)
+        let blur = store.preferences.interaction.backgroundBlur
+        let wallpaperKey = "\(wallpaperURL?.path ?? "")|\(blur)"
+        let key = "\(screen.deviceDescription)-\(frame)-\(insets)-\(wallpaperKey)"
+        if configurationKey == key, let launcherView {
+            if window.contentView !== launcherView { window.contentView = launcherView }
+            return
+        }
+        configurationKey = key
+        // 首屏只使用已经解码的缓存；大壁纸的读取、解码和模糊都不阻塞窗口出现。
+        let native = NativeLauncherView(store: store, wallpaper: wallpaperCache[wallpaperKey], screenInsets: insets)
+        launcherView = native
+        window.contentView = native
+        wallpaperTask?.cancel()
+        if let wallpaperURL {
+            wallpaperTask = Task { [weak native] in
+                let image = await wallpaperRenderer.render(url: wallpaperURL, radius: blur)
+                guard !Task.isCancelled, let image else { return }
+                let wallpaper = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                if wallpaperCache.count >= 3 { wallpaperCache.removeAll(keepingCapacity: true) }
+                wallpaperCache[wallpaperKey] = wallpaper
+                native?.setWallpaper(wallpaper)
+            }
+        }
         window.setFrame(frame, display: true)
     }
 
@@ -115,7 +231,22 @@ import SunnyPresentation
         let status = hotKey.setEnabled(preferences.hotKeyEnabled)
         store.hotkeyError = status == noErr ? nil : "\(store.text("hotkeyError")) (\(status))"
         settingsWindow?.title = "Sunny Launchpad · \(store.text("settings"))"
+        if appliedCover != preferences.interaction.coverSystemBars || appliedBlur != preferences.interaction.backgroundBlur {
+            appliedBlur = preferences.interaction.backgroundBlur
+            appliedCover = preferences.interaction.coverSystemBars
+            applyPresentation()
+            screenParametersChanged()
+        }
         rebuildMenus()
+    }
+
+    private var statusMenu: NSMenu?
+
+    /// 左键显示启动器，右键在菜单栏图标处展示操作菜单。
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            statusMenu?.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.minY), in: sender)
+        } else { showLauncher() }
     }
 
     private func rebuildMenus() {
@@ -125,7 +256,7 @@ import SunnyPresentation
         menu.addItem(item("refresh", action: #selector(refresh)))
         menu.addItem(.separator())
         menu.addItem(item("quit", action: #selector(quit), key: "q"))
-        statusItem?.menu = menu
+        statusMenu = menu
         let mainMenu = NSMenu()
         let root = NSMenuItem()
         root.title = "Sunny Launchpad"

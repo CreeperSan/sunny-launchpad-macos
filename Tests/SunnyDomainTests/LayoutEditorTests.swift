@@ -15,7 +15,7 @@ struct LayoutEditorTests {
         #expect(layout.folders[0].name == "工作")
         layout = LayoutEditor.move("app:a", toPage: "second", before: "app:d", in: layout)
         #expect(layout.pages[1].items == [.app("a"), .app("d")])
-        #expect(layout.folders[0].appIDs == ["b"])
+        #expect(layout.folders.isEmpty)
         layout = LayoutEditor.move("app:b", toPage: "first", before: "app:c", in: layout)
         #expect(layout.folders.isEmpty)
         try LayoutEditor.validate(WorkspaceState(layout: layout, catalog: apps))
@@ -67,4 +67,40 @@ struct LayoutEditorTests {
         #expect(AppLanguage.system.resolved(preferredLanguages: ["fr-FR", "ja-JP"]) == .japanese)
         #expect(AppLanguage.korean.resolved(preferredLanguages: ["en-US"]) == .korean)
     }
+    @Test func oldPreferencesDecodeAndNewCapacityPreservesOrder() throws {
+        let old = Data("{}".utf8)
+        let preferences = try JSONDecoder().decode(Preferences.self, from: old)
+        #expect(preferences.interaction == InteractionPreferences())
+        let records = (0..<80).map { ApplicationRecord(id: "item\($0)", name: "Item \($0)") }
+        var state = LayoutEditor.reconcile(WorkspaceState(), discovered: records)
+        let order = state.layout.appIDs
+        state.preferences.interaction.columns = 4
+        state.preferences.interaction.rows = 3
+        state.layout = LayoutEditor.repaginate(state.layout, capacity: 12)
+        #expect(state.layout.appIDs == order)
+        #expect(state.layout.pages.count == 7)
+        try LayoutEditor.validate(state)
+        state.preferences.interaction.iconScale = 2
+        #expect(throws: SunnyError.invalidLayout) { try LayoutEditor.validate(state) }
+    }
+
+    @Test func existingInteractionObjectReceivesBlurAndDirectionDefaults() throws {
+        let old = Data("{\"columns\":7,\"rows\":5,\"pageAnimation\":\"slide\"}".utf8)
+        let decoded = try JSONDecoder().decode(InteractionPreferences.self, from: old)
+        #expect(decoded.backgroundBlur == 18)
+        #expect(decoded.reversePaging == false)
+        #expect(decoded.dimColorHex == "000000")
+        #expect(decoded.dimOpacity == 0.22)
+        #expect(decoded.isValid)
+        var invalidDim = decoded
+        invalidDim.dimColorHex = "GGGGGG"
+        #expect(!invalidDim.isValid)
+        invalidDim = decoded
+        invalidDim.dimOpacity = 1.1
+        #expect(!invalidDim.isValid)
+        var state = WorkspaceState()
+        state.preferences.interaction.backgroundBlur = 61
+        #expect(throws: SunnyError.invalidLayout) { try LayoutEditor.validate(state) }
+    }
+
 }

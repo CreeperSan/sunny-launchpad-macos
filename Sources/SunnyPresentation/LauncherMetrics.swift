@@ -1,4 +1,4 @@
-// 按逻辑点计算网格，跨屏只改变尺寸，不改变分页或应用顺序。
+// 按可用屏幕计算图标与中心间距；百分比微调受单元格边界约束，避免重叠。
 import Foundation
 import SunnyDomain
 
@@ -9,16 +9,18 @@ public struct LauncherMetrics: Equatable, Sendable {
     public let tileWidth: CGFloat
     public static let verticalChrome: CGFloat = 190
     public static let columnSpacing: CGFloat = 10
-    private static let maximumCellHeight: CGFloat = 148
-    private static let maximumIconSize: CGFloat = 88
-    private static let labelAndInsets: CGFloat = 43
-    private static let maximumGridWidth: CGFloat = 1240
 
-    public init(availableSize: CGSize) {
-        horizontalPadding = max(20, availableSize.width * 0.06)
-        let gridWidth = min(Self.maximumGridWidth, availableSize.width - horizontalPadding * 2)
-        tileWidth = (gridWidth - CGFloat(LaunchpadRules.columns - 1) * Self.columnSpacing) / CGFloat(LaunchpadRules.columns)
-        cellHeight = max(48, min(Self.maximumCellHeight, (availableSize.height - Self.verticalChrome) / CGFloat(LaunchpadRules.rows)))
-        iconSize = max(12, min(Self.maximumIconSize, cellHeight - Self.labelAndInsets, tileWidth - 16))
+    public init(availableSize: CGSize, configuration: InteractionPreferences = InteractionPreferences()) {
+        let usableWidth = max(200, availableSize.width - 40)
+        // 100% 使用屏幕宽度的 88%；增加间距时最多扩展到安全边缘。
+        let gridWidth = min(usableWidth, availableSize.width * 0.88 * configuration.spacingScale)
+        horizontalPadding = max(20, (availableSize.width - gridWidth) / 2)
+        tileWidth = (gridWidth - CGFloat(configuration.columns - 1) * Self.columnSpacing) / CGFloat(configuration.columns)
+        let availableHeight = max(180, availableSize.height - Self.verticalChrome)
+        let baseHeight = availableHeight / CGFloat(configuration.rows)
+        cellHeight = max(min(32, baseHeight), baseHeight * min(1, configuration.spacingScale))
+        let displayScale = min(availableSize.width / 1512, availableSize.height / 850)
+        let desired = 80 * displayScale * configuration.iconScale
+        iconSize = max(8, min(desired, cellHeight - (cellHeight < 70 ? 26 : 43), tileWidth - 16))
     }
 }

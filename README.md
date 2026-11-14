@@ -1,15 +1,18 @@
 # Sunny Launchpad
 
-macOS 26+ 原生启动器，找回旧版 Launchpad 的分页网格与文件夹整理体验。当前版本为 **0.1.0 开发预览**。
+macOS 26+ 原生启动器，找回旧版 Launchpad 的分页网格与文件夹整理体验。当前版本为 **0.4.0 开发预览**。
 
 ## 已实现
 
-- 应用扫描、分页、搜索、启动、文件夹和布局持久化。
+- AppKit 原生界面与 Core Animation 分页、文件夹展开、搜索和布局持久化。
+- 首屏骨架、名称先显示、图标后台解码与淡入；内存及磁盘缓存、目录变化监听与每小时按需静默刷新。
 - 旧 Launchpad 布局只读导入：先预览，确认后保存到 Sunny 自有目录。
 - 独立设置窗口，经典启动台 / Liquid Glass 可切换。
 - 跟随系统 / 深色 / 亮色主题。
 - 跟随系统、简体中文、简体粤语、繁体中文、繁体广东话、英语、日语、韩语。
 - 显示器安全区域与尺寸适配，目录刷新、备份导出与恢复。
+
+个性化选项见「设置 → 交互与布局」：翻页及开关动画、时长、反向翻页、图标／间距百分比、行列、分页器和系统栏覆盖；外观页可调整背景模糊程度。运行模式从 Command + Tab 隐藏，可将 app 固定到 Dock。
 
 ## 构建运行
 
@@ -21,7 +24,7 @@ scripts/build-app.sh
 open "build/Sunny Launchpad.app"
 ```
 
-发布配置可使用 `scripts/build-app.sh release`。脚本只进行本地 ad-hoc 签名，正式分发仍需签名与公证。Xcode 可直接打开 `Package.swift`。
+构建默认使用 Release，也可显式执行 `scripts/build-app.sh release`。脚本只进行本地 ad-hoc 签名，正式分发仍需签名与公证。Xcode 可直接打开 `Package.swift`。
 
 ## 使用
 
@@ -32,7 +35,7 @@ open "build/Sunny Launchpad.app"
 - 「设置 → 布局与导入」查找旧布局或手选数据库，检查预览后应用。
 - 固定快捷键 Control + Option + Space，可在通用设置关闭；真实键盘兼容性仍需验收。
 
-默认自有数据位于 `~/Library/Application Support/com.creepersan.SunnyLaunchpad/`；`workspace.json` 保存状态，`Backups` 保留最近 30 份变更前备份。相同状态不重复备份。不会改写 Dock 数据、重置系统启动台或移动实际应用包。
+默认自有数据位于 `~/Library/Application Support/com.creepersan.SunnyLaunchpad/`；`workspace.json` 保存状态及目录更新时间，`IconCache` 保存可重建的图标缓存，`Backups` 保留最近 30 份变更前备份。相同状态不重复备份。不会改写 Dock 数据、重置系统启动台或移动实际应用包。
 
 开发隔离运行：
 
