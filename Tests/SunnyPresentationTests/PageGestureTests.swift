@@ -22,6 +22,57 @@ import SunnyDomain
         #expect(spy.launched == ["0"])
     }
 
+    /// 空白点击常伴随少量鼠标抖动，只有越过拖动阈值才应进入翻页。
+    @Test(arguments: [0.0, 2.0, 5.0, 30.0]) func backgroundClickToleratesPointerJitter(movement: Double) async throws {
+        let fixture = GestureFixture()
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let parent = NSView(frame: window.contentView!.bounds)
+        window.contentView = parent
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        view.frame = NSRect(x: 20, y: 20, width: 960, height: 660)
+        parent.addSubview(view)
+        view.layoutSubtreeIfNeeded()
+        let start = NSPoint(x: 5, y: 350)
+        let end = NSPoint(x: start.x + movement, y: start.y)
+        let target = try #require(view.hitTest(view.convert(start, to: parent)))
+        for blank in [NSPoint(x: 5, y: 5), NSPoint(x: 5, y: 645)] {
+            #expect(view.hitTest(view.convert(blank, to: parent)) === view)
+        }
+        // 图标、搜索栏和分页器仍保留各自的点击行为，不被背景关闭逻辑接管。
+        func descendants(of parent: NSView) -> [NSView] { parent.subviews.flatMap { [$0] + descendants(of: $0) } }
+        let all = descendants(of: view)
+        let tile = try #require(all.compactMap { $0 as? NativeTile }.first { $0.item?.id == "app:0" })
+        let iconPoint = tile.icon.convert(NSPoint(x: tile.icon.bounds.midX, y: tile.icon.bounds.midY), to: parent)
+        #expect(view.hitTest(iconPoint) === tile)
+        let searchIcon = try #require(all.compactMap { $0 as? NSImageView }.first)
+        let searchPoint = searchIcon.convert(NSPoint(x: searchIcon.bounds.midX, y: searchIcon.bounds.midY), to: parent)
+        let searchTarget = view.hitTest(searchPoint)
+        #expect(searchTarget is NativeSearchGlass || searchTarget is NativeSearchBackground)
+        let pager = try #require(all.compactMap { $0 as? NativePageControl }.first)
+        let pagerPoint = pager.convert(NSPoint(x: pager.bounds.midX, y: pager.bounds.midY), to: parent)
+        #expect(view.hitTest(pagerPoint) === pager)
+        // 背景直接命中接收首次点击的根视图，不依赖装饰层转发或窗口先激活。
+        #expect(target === view)
+        #expect(target.acceptsFirstMouse(for: nil))
+        var dismissCount = 0
+        store.dismiss = { dismissCount += 1 }
+        func event(_ type: NSEvent.EventType, at point: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil), modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)!
+        }
+        target.mouseDown(with: event(.leftMouseDown, at: start))
+        if movement > 0 { target.mouseDragged(with: event(.leftMouseDragged, at: end)) }
+        target.mouseUp(with: event(.leftMouseUp, at: end))
+        #expect(dismissCount == (movement <= 5 ? 1 : 0))
+        #expect(!store.pageDragging)
+        // 一次翻页或点击结束后，下一次普通点击也必须直接生效。
+        target.mouseDown(with: event(.leftMouseDown, at: start))
+        target.mouseUp(with: event(.leftMouseUp, at: start))
+        #expect(dismissCount == (movement <= 5 ? 2 : 1))
+    }
+
     @Test func searchOnlyLaunchesAfterExplicitReturn() async {
         let fixture = GestureFixture()
         let spy = GestureLauncherSpy()

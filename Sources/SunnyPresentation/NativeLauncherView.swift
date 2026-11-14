@@ -7,6 +7,8 @@ import SunnyDomain
 @MainActor public final class NativeLauncherView: NSView, NSTextFieldDelegate {
     /// 搜索条与屏幕安全区域顶部的间距。
     private static let searchTopSpacing: CGFloat = 38
+    /// 空白点击允许少量指针抖动，与图标拖动的起步距离保持一致。
+    private static let pointerDragThreshold: CGFloat = 5
     /// 文件夹标题与面板之间的布局尺寸。
     private static let folderHeaderHeight: CGFloat = 62
     private static let folderTitleFontSize: CGFloat = 28
@@ -761,18 +763,29 @@ import SunnyDomain
             if folder.frame.contains(local), store.folderProgress == 1 { return folder.hitTest(local) ?? folder }
             return self
         }
-        return super.hitTest(point)
+        let target = super.hitTest(point)
+        // 装饰层和网格容器不是控件，直接交给接收首次点击的根视图。
+        // 避免首次点击只激活窗口，以及沿多层 responder 链转发鼠标事件。
+        if target is NativeSurface || target === wallpaper || target === tint || target === loading { return self }
+        // 搜索图标也属于搜索栏，点击时保持与玻璃边缘一致的聚焦行为。
+        if target === searchIcon { return searchGlass.isHidden ? searchBackground : searchGlass }
+        return target
     }
     public override func mouseDown(with event: NSEvent) { pointerStart = convert(event.locationInWindow, from: nil); pointerLast = pointerStart; pointerDragging = false }
     public override func mouseDragged(with event: NSEvent) {
         guard store.folderID == nil else { return }
         let point = convert(event.locationInWindow, from: nil)
-        if !pointerDragging { beginPageGesture() }
-        pointerDragging = true
+        if !pointerDragging {
+            // 点击期间的轻微移动不能取消关闭；真正拖动时从按下位置累计位移。
+            guard hypot(point.x - pointerStart.x, point.y - pointerStart.y) > Self.pointerDragThreshold else { return }
+            beginPageGesture()
+            pointerDragging = true
+        }
         store.pageWidth = Double(max(pages.bounds.width, 1))
         store.dragPage(delta: Double(point.x - pointerLast.x) * pagingSign); pointerLast = point
     }
     public override func mouseUp(with event: NSEvent) {
+        defer { pointerDragging = false }
         if store.folderID != nil { store.closeFolder(); return }
         if pointerDragging { store.finishPageDrag() } else { store.dismiss() }
     }
