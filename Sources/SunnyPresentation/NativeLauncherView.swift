@@ -24,6 +24,8 @@ import SunnyDomain
     /// 拖到网格边缘并停留后翻页，避免经过边缘时误触。
     private static let dragPageEdgeWidth: CGFloat = 60
     private static let dragPageDelay: Duration = .milliseconds(650)
+    /// 拖到文件夹外后稍作停留，避免经过边界时误关闭。
+    private static let dragFolderCloseDelay: Duration = .milliseconds(650)
     private let store: LaunchpadStore
     private let wallpaper = NativeImageSurface()
     private let tint = NSView()
@@ -70,6 +72,8 @@ import SunnyDomain
     private var folderTransitionHiddenLabels: [NSView] = []
     private var dragMonitor: Any?
     private var dragPageTask: Task<Void, Never>?
+    private var dragFolderCloseTask: Task<Void, Never>?
+    private var dragPoint = NSPoint.zero
     private var dragPageDirection = 0
     private var dragTargetPage: Int?
     private let ghost = CALayer()
@@ -872,15 +876,23 @@ import SunnyDomain
         moveTileDrag(event)
     }
     func moveTileDrag(_ event: NSEvent) {
+        moveTileDrag(to: convert(event.locationInWindow, from: nil))
+    }
+
+    /// 收起文件夹后复用最后的指针位置，继续计算主页面落点。
+    private func moveTileDrag(to point: NSPoint) {
         guard let source = dragSource else { return }
-        let point = convert(event.locationInWindow, from: nil)
+        dragPoint = point
+        updateDragFolderClose(point)
+        CATransaction.begin(); CATransaction.setDisableActions(true); ghost.position = point; CATransaction.commit()
+        if !dragGlass.isHidden { dragGlass.frame = NSRect(x: point.x - ghost.bounds.width / 2, y: point.y - ghost.bounds.height / 2, width: ghost.bounds.width, height: ghost.bounds.height) }
+        // 回缩期间仍接收拖动和松手，但不再处理文件夹内的排序或翻页。
+        if store.folderID != nil && store.folderProgress == 0 { return }
         updateDragPageEdge(point)
         if dragTargetPage != store.activePage {
             dragTargetPage = store.activePage; dragTarget = nil; dragGroup = false; lastPreview = nil
             store.hoverGroup(nil)
         }
-        CATransaction.begin(); CATransaction.setDisableActions(true); ghost.position = point; CATransaction.commit()
-        if !dragGlass.isHidden { dragGlass.frame = NSRect(x: point.x - ghost.bounds.width / 2, y: point.y - ghost.bounds.height / 2, width: ghost.bounds.width, height: ghost.bounds.height) }
         let map = store.folderID == nil ? tiles : folderTiles
         let activeSurface = store.folderID == nil ? pageViews[store.activePage] : folderPageViews[store.activePage]
         guard let target = map.values.first(where: { tile in
@@ -927,6 +939,30 @@ import SunnyDomain
         store.cancelDrag(); clearTileDrag(); queueRender()
     }
 
+    /// 指针持续位于文件夹外时收起面板，移回或结束拖动则取消等待。
+    private func updateDragFolderClose(_ point: NSPoint) {
+        guard store.folderID != nil, store.folderProgress != 0, !folder.frame.contains(point) else {
+            dragFolderCloseTask?.cancel(); dragFolderCloseTask = nil
+            return
+        }
+        guard dragFolderCloseTask == nil else { return }
+        dragFolderCloseTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.dragFolderCloseDelay)
+            guard !Task.isCancelled, let self, self.dragSource != nil, self.store.folderID != nil else { return }
+            self.dragFolderCloseTask = nil
+            self.dragPageTask?.cancel(); self.dragPageTask = nil; self.dragPageDirection = 0
+            self.dragTarget = nil; self.dragGroup = false; self.lastPreview = nil; self.previewContext = nil
+            self.store.hoverGroup(nil)
+            self.store.closeFolder { [weak self] in
+                guard let self, self.dragSource != nil else { return }
+                self.store.previewMove(before: nil)
+                self.previewContext = "root|\(self.store.activePage)"
+                self.render()
+                self.moveTileDrag(to: self.dragPoint)
+            }
+        }
+    }
+
     /// 翻页后清除旧页面的悬停目标，允许继续拖向下一页。
     private func updateDragPageEdge(_ point: NSPoint) {
         let container = store.folderID == nil ? pages : folderPages
@@ -948,6 +984,7 @@ import SunnyDomain
     }
 
     private func clearTileDrag() {
+        dragFolderCloseTask?.cancel(); dragFolderCloseTask = nil
         dragPageTask?.cancel(); dragPageTask = nil; dragPageDirection = 0
         if let dragMonitor { NSEvent.removeMonitor(dragMonitor); self.dragMonitor = nil }
         dragSource = nil; dragTarget = nil; dragTargetPage = nil; dragGroup = false; lastPreview = nil; previewContext = nil

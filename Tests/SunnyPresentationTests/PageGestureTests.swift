@@ -437,6 +437,42 @@ import SunnyDomain
         #expect(store.state.layout == preview)
     }
 
+    @Test func draggingOutsideFolderClosesItAndContinuesOnRoot() async throws {
+        let folder = AppFolder(id: "tools", name: "Tools", pages: [["0", "1", "2"]])
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder), .app("3")])]), catalog: (0...3).map { ApplicationRecord(id: "\($0)", name: "\($0)") })
+        seed.catalogUpdatedAt = Date()
+        seed.preferences.reduceMotion = true
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        window.contentView = view
+        store.activate(.folder(folder))
+        for _ in 0..<20 { await Task.yield() }
+        view.layoutSubtreeIfNeeded()
+        func tiles(in parent: NSView) -> [NativeTile] { (parent as? NativeTile).map { [$0] } ?? parent.subviews.flatMap { tiles(in: $0) } }
+        guard let source = tiles(in: view).first(where: { $0.item?.id == "app:0" }) else { Issue.record("没有创建文件夹内图标"); return }
+        func event(_ type: NSEvent.EventType, at point: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil), modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        }
+        let inside = source.convert(NSPoint(x: source.bounds.midX, y: source.bounds.midY), to: view)
+        let outside = NSPoint(x: 5, y: 5)
+        view.beginTileDrag(source, event: event(.leftMouseDragged, at: outside))
+        view.moveTileDrag(event(.leftMouseDragged, at: inside))
+        try await Task.sleep(for: .milliseconds(750))
+        #expect(store.folderID == "tools")
+        view.moveTileDrag(event(.leftMouseDragged, at: outside))
+        try await Task.sleep(for: .milliseconds(750))
+        #expect(store.folderID == nil)
+        #expect(store.draggedID == "app:0")
+        view.endTileDrag(event(.leftMouseUp, at: outside))
+        for _ in 0..<100 where store.dragPreviewActive { await Task.yield() }
+        #expect(store.state.layout.pages[0].items.contains(.app("0")))
+        #expect(store.state.layout.folders.first?.pages == [["1", "2"]])
+    }
+
     @Test func folderBlocksBackgroundActivationAndRestoresPage() async {
         let folder = AppFolder(id: "tools", name: "Tools", pages: [["0", "1"]])
         var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder), .app("10")])]), catalog: [ApplicationRecord(id: "0", name: "A"), ApplicationRecord(id: "1", name: "B"), ApplicationRecord(id: "10", name: "Outside")])

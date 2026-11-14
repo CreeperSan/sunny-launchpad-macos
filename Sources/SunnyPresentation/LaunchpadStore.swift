@@ -272,7 +272,7 @@ import SunnyDomain
     }
 
     /// 文件夹关闭期间保持模态，不提前移除视图，保证回缩动画可见。
-    public func closeFolder() {
+    public func closeFolder(completion: (() -> Void)? = nil) {
         guard folderID != nil, folderProgress != 0 else { return }
         folderCloseTask?.cancel()
         folderProgress = 0
@@ -282,6 +282,7 @@ import SunnyDomain
             guard !Task.isCancelled else { return }
             folderID = nil
             folderPage = 0
+            completion?()
         }
     }
 
