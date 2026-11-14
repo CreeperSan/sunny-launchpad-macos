@@ -150,9 +150,9 @@ import SunnyDomain
         return NSButton(title: title, target: target, action: #selector(NativeControlAction.invokeAction))
     }
     private func button(_ key: String, action: @escaping () -> Void) { let control = makeButton(store.text(key), action: action); control.isEnabled = store.canEdit; add(control) }
-    private func toggle(_ key: String, path: WritableKeyPath<Preferences, Bool>) {
-        beginSettingGroup()
-        defer { endSettingGroup() }
+    private func toggle(_ key: String, path: WritableKeyPath<Preferences, Bool>, grouped: Bool = true) {
+        if grouped { beginSettingGroup() }
+        defer { if grouped { endSettingGroup() } }
         let control = NSButton(checkboxWithTitle: store.text(key), target: nil, action: nil)
         control.state = store.preferences[keyPath: path] ? .on : .off
         let target = NativeControlAction { [weak self, weak control] in
@@ -239,7 +239,13 @@ import SunnyDomain
         number("windowDuration", path: \.interaction.windowDuration, range: 0...1.5)
         picker("pagerStyle", values: PagerStyle.allCases, names: PagerStyle.allCases.map { store.text($0.rawValue) }, path: \.interaction.pagerStyle)
         toggle("reversePaging", path: \.interaction.reversePaging)
-        toggle("coverSystemBars", path: \.interaction.coverSystemBars)
+        toggle("coverMenuBar", path: \.interaction.coverMenuBar)
+        toggle("coverDock", path: \.interaction.coverDock)
+        beginSettingGroup()
+        label(store.text("experimental"))
+        toggle("useSystemAnimation", path: \.interaction.useSystemAnimation, grouped: false)
+        label(store.text("systemAnimationHelp"))
+        endSettingGroup()
     }
     private func importLayout() {
         label(store.text("importHelp"))

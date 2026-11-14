@@ -99,13 +99,37 @@ struct LayoutEditorTests {
         #expect(throws: SunnyError.invalidLayout) { try LayoutEditor.validate(state) }
     }
 
+    /// 两个覆盖选项必须独立往返保存；实验能力缺省始终关闭，不读取旧合并键。
+    @Test func systemBarPreferencesAreIndependentAndExperimentalIsOptIn() throws {
+        let defaults = try JSONDecoder().decode(InteractionPreferences.self, from: Data("{}".utf8))
+        #expect(defaults.coverMenuBar && defaults.coverDock)
+        #expect(!defaults.useSystemAnimation)
+        for menuBar in [false, true] {
+            for dock in [false, true] {
+                var preferences = InteractionPreferences()
+                preferences.coverMenuBar = menuBar
+                preferences.coverDock = dock
+                preferences.useSystemAnimation = true
+                let data = try JSONEncoder().encode(preferences)
+                let restored = try JSONDecoder().decode(InteractionPreferences.self, from: data)
+                #expect(restored == preferences)
+                let keys = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                #expect(keys["coverSystemBars"] == nil)
+            }
+        }
+        let obsolete = try JSONDecoder().decode(InteractionPreferences.self, from: Data("{\"coverSystemBars\":false}".utf8))
+        #expect(obsolete == defaults)
+    }
+
     @Test func existingInteractionObjectReceivesBlurAndDirectionDefaults() throws {
         let old = Data("{\"columns\":7,\"rows\":5,\"pageAnimation\":\"slide\"}".utf8)
         let decoded = try JSONDecoder().decode(InteractionPreferences.self, from: old)
         #expect(decoded.folderDuration == InteractionPreferences.defaultFolderDuration)
         #expect(decoded.backgroundBlur == 18)
         #expect(decoded.reversePaging == false)
-        #expect(decoded.coverSystemBars)
+        #expect(decoded.coverMenuBar)
+        #expect(decoded.coverDock)
+        #expect(!decoded.useSystemAnimation)
         #expect(decoded.dimColorHex == "000000")
         #expect(decoded.dimOpacity == 0.22)
         #expect(decoded.isValid)
@@ -118,8 +142,6 @@ struct LayoutEditorTests {
         var invalidDim = decoded
         invalidDim.dimColorHex = "GGGGGG"
         #expect(!invalidDim.isValid)
-        let oldDisabled = try JSONDecoder().decode(InteractionPreferences.self, from: Data("{\"coverSystemBars\":false}".utf8))
-        #expect(!oldDisabled.coverSystemBars)
         invalidDim = decoded
         invalidDim.dimOpacity = 1.1
         #expect(!invalidDim.isValid)

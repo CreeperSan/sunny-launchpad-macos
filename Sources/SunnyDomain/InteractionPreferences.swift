@@ -19,7 +19,10 @@ public struct InteractionPreferences: Codable, Equatable, Sendable {
     public var windowAnimation: WindowAnimation = .classic
     public var windowDuration = 0.25
     public var pagerStyle: PagerStyle = .dots
-    public var coverSystemBars = true
+    /// 菜单栏和 Dock 独立覆盖；实验性系统动画能力必须由用户手动开启。
+    public var coverMenuBar = true
+    public var coverDock = true
+    public var useSystemAnimation = false
     public var reversePaging = false
     public var backgroundBlur = 18.0
     /// 背景遮罩使用 sRGB 十六进制颜色和独立透明度，旧配置按默认值迁移。
@@ -27,9 +30,9 @@ public struct InteractionPreferences: Codable, Equatable, Sendable {
     public var dimOpacity = 0.22
     public init() {}
     private enum CodingKeys: String, CodingKey {
-        case columns, rows, iconScale, spacingScale, pageAnimation, pageDuration, folderDuration, windowAnimation, windowDuration, pagerStyle, coverSystemBars, reversePaging, backgroundBlur, dimColorHex, dimOpacity
+        case columns, rows, iconScale, spacingScale, pageAnimation, pageDuration, folderDuration, windowAnimation, windowDuration, pagerStyle, coverMenuBar, coverDock, useSystemAnimation, reversePaging, backgroundBlur, dimColorHex, dimOpacity
     }
-    /// 兼容已经保存了 interaction 对象但尚无新增字段的 0.2／0.3 数据。
+    /// 缺省字段使用当前默认值；覆盖选项只读取各自的新配置键。
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         columns = try values.decodeIfPresent(Int.self, forKey: .columns) ?? LaunchpadRules.columns
@@ -42,7 +45,9 @@ public struct InteractionPreferences: Codable, Equatable, Sendable {
         windowAnimation = try values.decodeIfPresent(WindowAnimation.self, forKey: .windowAnimation) ?? .classic
         windowDuration = try values.decodeIfPresent(Double.self, forKey: .windowDuration) ?? 0.25
         pagerStyle = try values.decodeIfPresent(PagerStyle.self, forKey: .pagerStyle) ?? .dots
-        coverSystemBars = try values.decodeIfPresent(Bool.self, forKey: .coverSystemBars) ?? true
+        coverMenuBar = try values.decodeIfPresent(Bool.self, forKey: .coverMenuBar) ?? true
+        coverDock = try values.decodeIfPresent(Bool.self, forKey: .coverDock) ?? true
+        useSystemAnimation = try values.decodeIfPresent(Bool.self, forKey: .useSystemAnimation) ?? false
         reversePaging = try values.decodeIfPresent(Bool.self, forKey: .reversePaging) ?? false
         backgroundBlur = try values.decodeIfPresent(Double.self, forKey: .backgroundBlur) ?? 18
         dimColorHex = try values.decodeIfPresent(String.self, forKey: .dimColorHex) ?? "000000"

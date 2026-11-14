@@ -121,29 +121,38 @@ import SunnyDomain
     public func text(_ key: String) -> String { L10n.text(key, language: preferences.language) }
     public func app(_ id: String) -> ApplicationRecord? { catalogIndex[id] }
 
-    /// 初始化数据读取失败后进入保护模式，仍允许扫描和启动已安装应用。
-    public func prepare() async {
+    /// 每次展示同步重置交互状态，避免窗口入场后才清空搜索或切换页面。
+    public func resetPresentation() {
         presentationID = UUID()
         query = ""
         folderID = nil
         organizing = false
         keyboardSelection = false
         if !preferences.rememberPage { pageIndex = 0 }
-        guard !busy else { return }
-        if !loaded {
-            busy = true
-            do {
-                if let cached = try await repository.load() {
-                    state = cached
-                    // 缓存先显示，后续由目录通知或一小时兜底触发静默校验。
-                    lastScan = cached.catalogUpdatedAt ?? .distantPast
-                }
+        clampPage()
+    }
+
+    /// 首屏只等自有缓存，不等待全目录扫描；加载失败仍保留只读保护。
+    public func loadCachedState() async {
+        guard !loaded, !busy else { return }
+        busy = true
+        do {
+            if let cached = try await repository.load() {
+                state = cached
+                lastScan = cached.catalogUpdatedAt ?? .distantPast
             }
-            catch { readOnly = true; report(error) }
-            loaded = true
-            busy = false
-            preferencesChanged(preferences)
         }
+        catch { readOnly = true; report(error) }
+        loaded = true
+        busy = false
+        preferencesChanged(preferences)
+    }
+
+    /// 初始化与目录刷新保留原入口；窗口入口已同步重置时不再重复修改首屏状态。
+    public func prepare(resetPresentation: Bool = true) async {
+        if resetPresentation { self.resetPresentation() }
+        guard !busy else { return }
+        await loadCachedState()
         if state.catalog.isEmpty || catalogDirty || Date().timeIntervalSince(lastScan) >= scanInterval { await refresh() }
         clampPage()
     }

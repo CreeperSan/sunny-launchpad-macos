@@ -56,6 +56,8 @@ import SunnyDomain
     private var previousFolderPagePosition = Double.nan
     private var previousPage = Double.nan
     private var previousReveal = Double.nan
+    private var continuingReveal = false
+    private let wallpaperFrame: NSRect?
     private var previousFolderProgress = Double.nan
     private var previousFolderID: String?
     private var folderSource = CGRect.zero
@@ -90,9 +92,10 @@ import SunnyDomain
 
     public static func configureIconCache(directory: URL) { AppIconCache.shared.directory = directory }
 
-    public init(store: LaunchpadStore, wallpaper image: NSImage?, screenInsets: NSEdgeInsets) {
+    public init(store: LaunchpadStore, wallpaper image: NSImage?, screenInsets: NSEdgeInsets, wallpaperFrame: NSRect? = nil) {
         self.store = store
         insets = screenInsets
+        self.wallpaperFrame = wallpaperFrame
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
@@ -242,7 +245,7 @@ import SunnyDomain
         super.layout()
         guard previousBounds != bounds else { return }
         previousBounds = bounds
-        wallpaper.frame = bounds.insetBy(dx: -64, dy: -64)
+        wallpaper.frame = wallpaperFrame ?? bounds.insetBy(dx: -64, dy: -64)
         tint.frame = bounds
         content.frame = bounds
         let area = bounds.insetBy(dx: 0, dy: 0)
@@ -323,7 +326,7 @@ import SunnyDomain
             let scale = config.windowAnimation == .classic ? 1 + (1 - progress) * 0.14 : 1
             var transform = LayerAnimation.centeredScale(x: scale, y: scale, size: content.bounds.size)
             if config.windowAnimation == .rise { transform = CATransform3DTranslate(transform, 0, (1 - progress) * 60, 0) }
-            let entering = previousReveal == 0 && progress == 1
+            let entering = previousReveal == 0 && progress == 1 && !continuingReveal
             if let layer = content.layer {
                 // 入场起点以已配置的模型图层为准：窗口刚显示时 presentation 可能仍是旧的恒等变换。
                 let start = entering ? NSValue(caTransform3D: layer.transform) : nil
@@ -756,7 +759,11 @@ import SunnyDomain
     }
 
     /// 窗口显示后立即提交终点，不依赖异步 Observation 更新是否合并。
-    public func performReveal() { render() }
+    public func performReveal(continuing: Bool = false) {
+        continuingReveal = continuing
+        render()
+        continuingReveal = false
+    }
 
     public override func scrollWheel(with event: NSEvent) {
         if dragSource != nil {

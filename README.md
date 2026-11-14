@@ -36,6 +36,8 @@ open "build/Sunny Launchpad.app"
 - 图标中心拖放成组、边缘排序；右键菜单可跨页移动。拖拽手感仍处于预览验证阶段。
 - 「设置 → 布局与导入」查找旧布局或手选数据库，检查预览后应用。
 - 固定快捷键 Control + Option + Space，可在通用设置关闭；真实键盘兼容性仍需验收。
+- 「设置 → 交互与布局」可独立控制顶部菜单栏和 Dock 的覆盖；使用窗口覆盖，不切换系统 Dock 隐藏状态。
+- 同页「实验性 → 使用系统能力优化动画」默认关闭，手动开启后使用私有系统能力增强菜单栏过渡；不可用时回退普通窗口动画。
 
 默认自有数据位于 `~/Library/Application Support/com.creepersan.SunnyLaunchpad/`；`workspace.json` 保存状态及目录更新时间，`IconCache` 保存可重建的图标缓存，`Backups` 保留最近 30 份变更前备份。相同状态不重复备份。不会改写 Dock 数据、重置系统启动台或移动实际应用包。
 

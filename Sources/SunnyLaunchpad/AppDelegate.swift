@@ -16,10 +16,12 @@ import SunnyPresentation
     private let directoryWatcher = ApplicationDirectoryWatcher()
     private var ready = false
     private var closing = false
-    private var transitionTask: Task<Void, Never>?
-    private var savedPresentation: NSApplication.PresentationOptions?
-    private var appliedCover: Bool?
-    private var appliedBlur: Double?
+    /// 每次反向显隐递增，过期动画完成回调不得隐藏新打开的窗口。
+    private var transitionGeneration = 0
+    private var appliedInteraction: InteractionPreferences?
+    private let systemMenuBarAnimator = SystemMenuBarAnimator()
+    /// 覆盖菜单栏所需的最低常规层级；避免使用屏保层级压住辅助窗口。
+    private let systemBarCoverLevel = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1)
     private let wallpaperRenderer = WallpaperRenderer()
     private var wallpaperTask: Task<Void, Never>?
     private var launcherScreenNumber: NSNumber?
@@ -45,15 +47,17 @@ import SunnyPresentation
         NotificationCenter.default.addObserver(self, selector: #selector(screenParametersChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(systemLocaleChanged), name: NSLocale.currentLocaleDidChangeNotification, object: nil)
         rebuildMenus()
-        ready = true
-        // 启动时校验缓存，补上程序未运行期间的安装或卸载。
-        store.markCatalogDirty()
-        showLauncher()
+        // 先读取自有布局和偏好再准备首帧，避免入场中途切换覆盖范围。
+        Task {
+            await store.loadCachedState()
+            ready = true
+            store.markCatalogDirty()
+            showLauncher()
+        }
         Task { [self] in
             await Task.yield()
             directoryWatcher.onChange = { [weak self] in
                 guard let self else { return }
-                self.directoryWatcher.start()
                 self.store.markCatalogDirty()
                 if self.launcherWindow?.isVisible == true { Task { await self.store.refresh() } }
             }
@@ -74,9 +78,9 @@ import SunnyPresentation
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func applicationWillTerminate(_ notification: Notification) { hotKey.stop(); directoryWatcher.stop(); restorePresentation() }
-    func applicationDidResignActive(_ notification: Notification) { hideLauncher() }
-    func applicationDidBecomeActive(_ notification: Notification) { applyPresentation() }
+    func applicationWillTerminate(_ notification: Notification) { hotKey.stop(); directoryWatcher.stop(); systemMenuBarAnimator.restore() }
+    func applicationDidResignActive(_ notification: Notification) { hideLauncher(); systemMenuBarAnimator.restore() }
+    func applicationDidBecomeActive(_ notification: Notification) { updateSystemMenuBar(duration: windowMotion ?? 0) }
 
     /// 不创建原生全屏 Space；覆盖鼠标所在显示器，保留普通桌面切换方式。
     @objc private func showLauncher() {
@@ -95,70 +99,73 @@ import SunnyPresentation
             window.delegate = self
             launcherWindow = window
         }
+        let reversing = closing
         closing = false
-        transitionTask?.cancel()
+        transitionGeneration += 1
         window.animationBehavior = .none
-        // 窗口先显示空视图，再安装启动器视图并执行进入动画。
-        window.setFrame(screen.frame, display: false)
-        window.contentView = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
-        window.level = store.preferences.interaction.coverSystemBars ? NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1) : .normal
+        if !reversing {
+            store.resetPresentation()
+            store.revealProgress = 0
+        }
+        // 保留已有内容；窗口隐藏时先完成布局和图层初态，再一次性显示及提交入场。
+        configure(window, on: screen)
+        if !reversing { launcherView?.prepareReveal() }
+        applyWindowLevel()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        window.displayIfNeeded()
-        CATransaction.flush()
-        applyPresentation()
+        updateSystemMenuBar(duration: windowMotion ?? 0)
+        store.revealProgress = 1
+        launcherView?.performReveal(continuing: reversing)
         preparationTask?.cancel()
-        preparationTask = Task { await store.prepare() }
-        transitionTask = Task {
-            await Task.yield()
-            guard !Task.isCancelled else { return }
-            // 挂载视图之前设置起点，避免首次绘制先展示完整画面。
-            store.revealProgress = 0
-            configure(window, on: screen)
-            (window.contentView as? NativeLauncherView)?.prepareReveal()
-            applyPresentation()
-            store.revealProgress = 1
-            (window.contentView as? NativeLauncherView)?.performReveal()
-        }
+        preparationTask = Task { await store.prepare(resetPresentation: false) }
     }
 
     private var windowMotion: Double? {
         store.preferences.reduceMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || store.preferences.interaction.windowAnimation == .none ? nil : store.preferences.interaction.windowDuration
     }
 
+    /// 整个窗口淡出直接露出系统栏，不再等待动画后切换 Dock 隐藏状态。
     @objc private func hideLauncher() {
-        guard !closing, launcherWindow?.isVisible == true else { return }
+        guard !closing, let window = launcherWindow, window.isVisible else { return }
         closing = true
-        transitionTask?.cancel()
+        transitionGeneration += 1
+        let generation = transitionGeneration
         store.cancelDrag()
-        let duration = windowMotion == nil ? 0 : store.preferences.interaction.windowDuration
-        store.revealProgress = 0
-        (launcherWindow?.contentView as? NativeLauncherView)?.performReveal()
-        transitionTask = Task {
-            try? await Task.sleep(for: .seconds(duration))
-            guard !Task.isCancelled else { return }
-            launcherWindow?.orderOut(nil)
-            restorePresentation()
-            closing = false
+        let duration = windowMotion ?? 0
+        updateSystemMenuBar(duration: duration)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.closing, self.transitionGeneration == generation else { return }
+                self.launcherWindow?.orderOut(nil)
+                self.systemMenuBarAnimator.restore()
+                self.closing = false
+            }
         }
+        store.revealProgress = 0
+        launcherView?.performReveal()
+        CATransaction.commit()
     }
 
-    private func applyPresentation() {
-        guard launcherWindow?.isVisible == true else { return }
-        if store.preferences.interaction.coverSystemBars {
-            if savedPresentation == nil { savedPresentation = NSApp.presentationOptions }
-            NSApp.presentationOptions = [.hideDock, .hideMenuBar]
-            launcherWindow?.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1)
-        } else { restorePresentation() }
+    /// 覆盖范围由窗口矩形控制，不触发系统 Dock 自身的显隐。
+    private func applyWindowLevel() {
+        let interaction = store.preferences.interaction
+        launcherWindow?.level = interaction.coverMenuBar || interaction.coverDock ? systemBarCoverLevel : .normal
     }
 
-    private func restorePresentation() {
-        if let savedPresentation { NSApp.presentationOptions = savedPresentation }
-        savedPresentation = nil
-        launcherWindow?.level = .normal
+    /// 私有能力只增强菜单栏透明度；关闭实验选项时完全使用普通窗口覆盖。
+    private func updateSystemMenuBar(duration: Double) {
+        let interaction = store.preferences.interaction
+        guard interaction.useSystemAnimation, interaction.coverMenuBar, NSApp.isActive,
+              let window = launcherWindow, window.isVisible, let view = launcherView else {
+            systemMenuBarAnimator.restore()
+            return
+        }
+        systemMenuBarAnimator.animate(hidden: !closing, duration: duration, view: view)
     }
+
     @objc private func toggleLauncher() {
-        if launcherWindow?.isVisible == true { hideLauncher() } else { showLauncher() }
+        if closing || launcherWindow?.isVisible != true { showLauncher() } else { hideLauncher() }
     }
 
     @objc private func showSettings() {
@@ -194,10 +201,11 @@ import SunnyPresentation
 
     private func configure(_ window: NSWindow, on screen: NSScreen) {
         launcherScreenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-        let frame = screen.frame
-        let visible = screen.visibleFrame.intersection(frame)
-        let normalInsets = NSEdgeInsets(top: max(0, frame.maxY - visible.maxY), left: max(0, visible.minX - frame.minX), bottom: max(0, visible.minY - frame.minY), right: max(0, frame.maxX - visible.maxX))
-        let insets = store.preferences.interaction.coverSystemBars ? NSEdgeInsets(top: screen.safeAreaInsets.top, left: 0, bottom: 0, right: 0) : normalInsets
+        let interaction = store.preferences.interaction
+        let layout = LauncherWindowLayout(screenFrame: screen.frame, visibleFrame: screen.visibleFrame, safeAreaTop: screen.safeAreaInsets.top, coverMenuBar: interaction.coverMenuBar, coverDock: interaction.coverDock)
+        let frame = layout.frame
+        let insets = layout.contentInsets
+        window.setFrame(frame, display: false)
         let wallpaperURL = NSWorkspace.shared.desktopImageURL(for: screen)
         let blur = store.preferences.interaction.backgroundBlur
         let wallpaperKey = "\(wallpaperURL?.path ?? "")|\(blur)"
@@ -208,7 +216,7 @@ import SunnyPresentation
         }
         configurationKey = key
         // 首屏只使用已经解码的缓存；大壁纸的读取、解码和模糊都不阻塞窗口出现。
-        let native = NativeLauncherView(store: store, wallpaper: wallpaperCache[wallpaperKey], screenInsets: insets)
+        let native = NativeLauncherView(store: store, wallpaper: wallpaperCache[wallpaperKey], screenInsets: insets, wallpaperFrame: layout.wallpaperFrame)
         launcherView = native
         window.contentView = native
         wallpaperTask?.cancel()
@@ -222,7 +230,6 @@ import SunnyPresentation
                 native?.setWallpaper(wallpaper)
             }
         }
-        window.setFrame(frame, display: true)
     }
 
     private func applyPreferences(_ preferences: Preferences) {
@@ -235,11 +242,11 @@ import SunnyPresentation
         let status = hotKey.setEnabled(preferences.hotKeyEnabled)
         store.hotkeyError = status == noErr ? nil : "\(store.text("hotkeyError")) (\(status))"
         settingsWindow?.title = "Sunny Launchpad · \(store.text("settings"))"
-        if appliedCover != preferences.interaction.coverSystemBars || appliedBlur != preferences.interaction.backgroundBlur {
-            appliedBlur = preferences.interaction.backgroundBlur
-            appliedCover = preferences.interaction.coverSystemBars
-            applyPresentation()
+        if appliedInteraction != preferences.interaction {
+            appliedInteraction = preferences.interaction
+            applyWindowLevel()
             screenParametersChanged()
+            updateSystemMenuBar(duration: windowMotion ?? 0)
         }
         rebuildMenus()
     }

@@ -5,6 +5,8 @@ import Testing
 import SunnyDomain
 @testable import SunnyPresentation
 
+// AppKit 视图共享 NSApplication，异步等待期间也应避免多个用例交错操作。
+@Suite(.serialized)
 @MainActor struct PageGestureTests {
     @Test func launchDismissesBeforeSystemLaunchCompletes() async {
         let fixture = GestureFixture()
@@ -238,9 +240,16 @@ import SunnyDomain
         view.layoutSubtreeIfNeeded()
         let scroll = try #require(descendants(view).compactMap { $0 as? NSScrollView }.first)
         for key in ["general", "appearance", "interaction", "import", "about"] {
-            let button = try #require(descendants(view).compactMap { $0 as? NSButton }.first { $0.title == store.text(key) })
+            let button = try #require(descendants(view).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == store.text(key) })
             button.performClick(nil)
             view.layoutSubtreeIfNeeded()
+            if key == "interaction" {
+                let controls = descendants(view).compactMap { $0 as? NSButton }
+                for (key, expected) in [("coverMenuBar", NSControl.StateValue.on), ("coverDock", .on), ("useSystemAnimation", .off)] {
+                    let control = try #require(controls.first { $0.title == store.text(key) })
+                    #expect(control.state == expected)
+                }
+            }
             let stack = try #require(scroll.documentView as? NSStackView)
             #expect(stack.isFlipped)
             let heading = try #require(stack.arrangedSubviews.first)
@@ -540,6 +549,29 @@ import SunnyDomain
         view.performReveal()
         #expect(view.layer?.opacity == 0)
         #expect((view.layer?.animation(forKey: "opacity") as? CABasicAnimation)?.duration == store.preferences.interaction.windowDuration)
+    }
+
+    /// 退出中途反向打开时使用当前图层状态，不能再次从透明与最大缩放开始。
+    @Test func interruptedRevealContinuesFromCurrentLayerValues() async throws {
+        let fixture = GestureFixture()
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        view.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        store.revealProgress = 0
+        view.prepareReveal()
+        let content = try #require(view.subviews.compactMap { $0 as? NativeSurface }.first)
+        view.layer?.removeAllAnimations()
+        content.layer?.removeAllAnimations()
+        view.layer?.opacity = 0.4
+        content.layer?.transform = LayerAnimation.centeredScale(x: 1.07, y: 1.07, size: content.bounds.size)
+        store.revealProgress = 1
+        view.performReveal(continuing: true)
+        let opacity = try #require(view.layer?.animation(forKey: "opacity") as? CABasicAnimation)
+        let transform = try #require(content.layer?.animation(forKey: "transform") as? CABasicAnimation)
+        #expect(abs((opacity.fromValue as? Float ?? 0) - 0.4) < 0.001)
+        #expect(abs(((transform.fromValue as? NSValue)?.caTransform3DValue.m11 ?? 0) - 1.07) < 0.001)
     }
 
     @Test func recentCacheSkipsScanUntilInvalidated() async {

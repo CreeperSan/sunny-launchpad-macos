@@ -1,44 +1,49 @@
-// 监听应用目录及其分类目录，不进入 .app 包，空闲时不轮询。
+// 使用系统递归目录事件监听应用变化，避免每个子目录持有一个文件句柄。
 import Foundation
-import Darwin
+import CoreServices
 
 @MainActor public final class ApplicationDirectoryWatcher {
-    private var sources: [any DispatchSourceFileSystemObject] = []
-    private var debounce: Task<Void, Never>?
+    private static let eventLatency: CFTimeInterval = 0.5
+    private var stream: FSEventStreamRef?
+    private let roots: [URL]
     public var onChange: () -> Void = {}
-    public init() {}
+    /// 可注入隔离目录用于验证递归事件；正式运行只监听系统应用位置。
+    public init(roots: [URL]? = nil) {
+        let manager = FileManager.default
+        self.roots = roots ?? [manager.homeDirectoryForCurrentUser.appendingPathComponent("Applications"), URL(fileURLWithPath: "/Applications"), URL(fileURLWithPath: "/System/Applications"), URL(fileURLWithPath: "/System/Cryptexes/App/System/Applications"), URL(fileURLWithPath: "/System/Library/CoreServices/Applications")]
+    }
+    isolated deinit { stop() }
 
+    /// FSEvents 自动包含新增的分类目录，无需遍历应用目录或在每次通知后重建监听。
     public func start() {
         stop()
         let manager = FileManager.default
-        let roots = [manager.homeDirectoryForCurrentUser.appendingPathComponent("Applications"), URL(fileURLWithPath: "/Applications"), URL(fileURLWithPath: "/System/Applications"), URL(fileURLWithPath: "/System/Cryptexes/App/System/Applications"), URL(fileURLWithPath: "/System/Library/CoreServices/Applications")]
-        var directories = roots
-        for root in roots {
-            guard let enumerator = manager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
-            for case let url as URL in enumerator {
-                guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey]), values.isDirectory == true, values.isPackage != true else { continue }
-                directories.append(url)
+        let paths = roots.filter { manager.fileExists(atPath: $0.path) }.map { $0.resolvingSymlinksInPath().path }
+        guard !paths.isEmpty else { return }
+        var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
+        let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagWatchRoot | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagFileEvents)
+        guard let stream = FSEventStreamCreate(nil, { _, pointer, _, _, _, _ in
+            guard let pointer else { return }
+            // 流固定投递到主队列，回调可直接调用主线程上的 Store 协调逻辑。
+            MainActor.assumeIsolated {
+                Unmanaged<ApplicationDirectoryWatcher>.fromOpaque(pointer).takeUnretainedValue().onChange()
             }
+        }, &context, paths as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), Self.eventLatency, flags) else { return }
+        FSEventStreamSetDispatchQueue(stream, .main)
+        guard FSEventStreamStart(stream) else {
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            return
         }
-        var seen = Set<String>()
-        for url in directories where seen.insert(url.resolvingSymlinksInPath().path).inserted {
-            let descriptor = open(url.path, O_EVTONLY)
-            guard descriptor >= 0 else { continue }
-            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: .main)
-            source.setEventHandler { [weak self] in
-                Task { @MainActor [weak self] in
-                    self?.debounce?.cancel()
-                    self?.debounce = Task { [weak self] in
-                        try? await Task.sleep(for: .milliseconds(500))
-                        guard !Task.isCancelled else { return }
-                        self?.onChange()
-                    }
-                }
-            }
-            source.setCancelHandler { close(descriptor) }
-            source.resume()
-            sources.append(source)
-        }
+        self.stream = stream
     }
-    public func stop() { debounce?.cancel(); sources.forEach { $0.cancel() }; sources.removeAll() }
+
+    /// 先停止并使回调失效，再释放流，退出时不留下悬空的上下文指针。
+    public func stop() {
+        guard let stream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        self.stream = nil
+    }
 }
