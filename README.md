@@ -24,7 +24,9 @@ scripts/build-app.sh
 open "build/Sunny Launchpad.app"
 ```
 
-构建默认使用 Release，也可显式执行 `scripts/build-app.sh release`。脚本只进行本地 ad-hoc 签名，正式分发仍需签名与公证。Xcode 可直接打开 `Package.swift`。
+构建默认使用 Release，也可显式执行 `scripts/build-app.sh release`。脚本只进行本地 ad-hoc 签名，正式分发仍需签名与公证。
+
+项目使用 Swift Package 管理，没有独立的 `.xcodeproj`。在 Xcode 中选择「File → Open」，打开项目根目录的 `Package.swift`，即可浏览、编辑代码，选择 `SunnyLaunchpad` 运行或执行测试。构建独立的 `.app` 时使用上面的打包脚本；Xcode 直接运行用于开发调试。
 
 ## 使用
 

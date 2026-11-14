@@ -44,6 +44,7 @@ import SunnyDomain
     private var dragGroup = false
     private var lastPreview: String?
     private let ghost = CALayer()
+    private let dragGlass = NSGlassEffectView()
     private var pointerStart = NSPoint.zero
     private var pointerLast = NSPoint.zero
     private var pointerDragging = false
@@ -81,11 +82,12 @@ import SunnyDomain
         pages.addSubview(skeletonGrid)
         pages.layer?.masksToBounds = true
         searchIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
-        searchIcon.contentTintColor = .secondaryLabelColor
+        searchIcon.contentTintColor = NSColor.white.withAlphaComponent(0.75)
         searchIcon.imageScaling = .scaleProportionallyUpOrDown
         search.isBordered = false
         search.drawsBackground = false
         search.font = .systemFont(ofSize: 15)
+        search.textColor = .white
         search.cell?.usesSingleLineMode = true
         search.cell?.isScrollable = true
         search.cell?.wraps = false
@@ -107,28 +109,35 @@ import SunnyDomain
         settings.target = self
         settings.action = #selector(openSettings)
         settings.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
+        settings.contentTintColor = .white
         settings.isBordered = false
         organize.target = self
         organize.action = #selector(toggleOrganizing)
         organize.isBordered = false
+        organize.contentTintColor = .white
         loading.alignment = .center
+        loading.textColor = .white
         folder.consumeBackgroundEvents = true
         folderPages.consumeBackgroundEvents = true
         folder.wantsLayer = true
-        folder.layer?.cornerRadius = 30
+        folder.layer?.cornerRadius = 44
         folder.layer?.masksToBounds = true
         folderBackground.wantsLayer = true
-        folderBackground.layer?.cornerRadius = 30
+        folderBackground.layer?.cornerRadius = 44
         folder.addSubview(folderBackground)
-        folderGlass.cornerRadius = 30
-        folderGlass.style = .regular
+        folderGlass.cornerRadius = 44
+        folderGlass.style = .clear
         folder.addSubview(folderGlass)
         folder.isHidden = true
         addSubview(folder)
+        dragGlass.style = .clear
+        dragGlass.isHidden = true
+        addSubview(dragGlass)
         folderTitle.isBordered = false
         folderTitle.drawsBackground = false
         folderTitle.alignment = .center
         folderTitle.font = .systemFont(ofSize: 23, weight: .medium)
+        folderTitle.textColor = .white
         folderTitle.target = self
         folderTitle.action = #selector(renameFolder)
         folder.addSubview(folderTitle)
@@ -230,13 +239,15 @@ import SunnyDomain
         let glass = preferences.style == .liquidGlass && !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
         searchGlass.isHidden = !glass
         searchBackground.isHidden = glass
-        searchBackground.layer?.backgroundColor = NSColor(white: dark ? 0.2 : 0.95, alpha: 0.88).cgColor
+        searchBackground.layer?.backgroundColor = NSColor(white: 0.15, alpha: dark ? 0.75 : 0.55).cgColor
         search.focusRingType = glass ? .none : .default
         folderGlass.isHidden = !glass
         folderBackground.isHidden = glass
         folderBackground.layer?.backgroundColor = NSColor(white: dark ? 0.16 : 0.88, alpha: 0.94).cgColor
         folder.layer?.backgroundColor = NSColor.clear.cgColor
-        search.placeholderString = store.text("search")
+        if search.placeholderString != store.text("search"), let cell = search.cell as? NSTextFieldCell {
+            cell.placeholderAttributedString = NSAttributedString(string: store.text("search"), attributes: [.foregroundColor: NSColor.white.withAlphaComponent(0.7)])
+        }
         if search.stringValue != store.query { search.stringValue = store.query }
         settings.toolTip = store.text("settings")
         organize.title = store.text(store.organizing ? "done" : "organize")
@@ -275,10 +286,8 @@ import SunnyDomain
                 LayerAnimation.apply(layer, key: "transform", value: NSValue(caTransform3D: transform), duration: duration, screen: window?.screen, startValue: start)
             }
             // 整个启动器淡出，包括壁纸和正在打开的文件夹；窗口在动画完成前保持原层级。
-            // 经典缩放在起始帧保留可见内容，避免透明度动画掩盖缩放；淡入样式仍从全透明开始。
-            let initialOpacity = config.windowAnimation == .classic ? 0.65 : 0.0
-            let opacity = progress == 0 && previousReveal.isFinite ? 0 : initialOpacity + (1 - initialOpacity) * progress
-            if let layer { LayerAnimation.apply(layer, key: "opacity", value: Float(opacity), duration: duration, screen: window?.screen, startValue: entering ? Float(initialOpacity) : nil) }
+            // 起始帧保持透明，避免布局完成后先出现静止画面，再开始动画。
+            if let layer { LayerAnimation.apply(layer, key: "opacity", value: Float(progress), duration: duration, screen: window?.screen, startValue: entering ? Float(0) : nil) }
             frameMeter.sample(for: duration)
             previousReveal = progress
         }
@@ -293,7 +302,7 @@ import SunnyDomain
         store.motion == nil || store.preferences.interaction.windowAnimation == .none ? 0 : store.preferences.interaction.windowDuration
     }
 
-    private func updatePages(_ data: [[LayoutItem]], surfaces: inout [Int: NativeSurface], tileMap: inout [String: NativeTile], container: NSView, metrics: LauncherMetrics, columns: Int, rows: Int, rebuild: Bool, inFolder: Bool) {
+    private func updatePages(_ data: [[LayoutItem]], surfaces: inout [Int: NativeSurface], tileMap: inout [String: NativeTile], container: NSView, metrics: LauncherMetrics, columns: Int, rows: Int, rebuild: Bool, inFolder: Bool, iconSizeOverride: CGFloat? = nil) {
         // 数据变化才整理图标视图；跟手阶段仅改变父图层的 transform。
         guard rebuild || surfaces.isEmpty else { return }
         let active = inFolder ? store.folderPage : store.pageIndex
@@ -335,7 +344,9 @@ import SunnyDomain
                     title = folder.name
                     image = folderThumbnail(folder)
                 }
-                tile.configure(title: title, image: image, iconSize: min(metrics.iconSize, height - 32), selected: pageIndex == active && store.keyboardSelection && store.selectedIndex == index, grouping: store.groupingTarget == item.id && store.groupingReady, loading: { if case .app(let id) = item { !AppIconCache.shared.isReady(store.app(id)) } else { false } }(), folderStyle: { if case .folder = item { store.preferences.style == .liquidGlass && !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency } else { nil } }())
+                // 文件夹优先沿用主页面图标尺寸，同时受当前单元格限制，避免小屏重叠。
+                let iconSize = min(iconSizeOverride ?? metrics.iconSize, height - 32, width - 16)
+                tile.configure(title: title, image: image, iconSize: iconSize, selected: pageIndex == active && store.keyboardSelection && store.selectedIndex == index, grouping: store.groupingTarget == item.id && store.groupingReady, loading: { if case .app(let id) = item { !AppIconCache.shared.isReady(store.app(id)) } else { false } }(), folderStyle: { if case .folder = item { store.preferences.style == .liquidGlass && !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency } else { nil } }())
                 let target = NSRect(x: metrics.horizontalPadding + CGFloat(index % columns) * width, y: CGFloat(index / columns) * height, width: width, height: height)
                 let from = tile.layer?.presentation()?.position ?? tile.layer?.position
                 tile.frame = target
@@ -437,14 +448,13 @@ import SunnyDomain
         }
         let rows = min(LaunchpadRules.folderRows, max(1, Int(ceil(Double(data.pages.map(\.count).max() ?? 1) / Double(LaunchpadRules.columns)))))
         let width = min(bounds.width * 0.84, bounds.width - 80)
-        let height = min(bounds.height - insets.top - insets.bottom - 120, CGFloat(rows) * min(160, pages.bounds.height / CGFloat(store.preferences.interaction.rows)) + 115)
+        let rootRowHeight = pages.bounds.height / CGFloat(store.preferences.interaction.rows)
+        let height = min(bounds.height - insets.top - insets.bottom - 120, CGFloat(rows) * rootRowHeight + 115)
         let target = NSRect(x: bounds.midX - width / 2, y: bounds.midY - height / 2, width: width, height: height)
         folder.frame = target
         // 标题置于半透明面板上方，布局参照 LaunchOS 的文件夹展开样式。
         folderGlass.frame = NSRect(x: 0, y: 50, width: width, height: height - 50)
         folderBackground.frame = folderGlass.frame
-        folderGlass.layer?.borderWidth = 1
-        folderGlass.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
         folderTitle.frame = NSRect(x: 30, y: 4, width: width - 60, height: 36)
         if opening { folderTitle.stringValue = data.name }
         folderPages.frame = NSRect(x: 12, y: 65, width: width - 24, height: height - 115)
@@ -452,7 +462,9 @@ import SunnyDomain
         folderPager.count = data.pages.count; folderPager.active = store.folderPage; folderPager.style = store.preferences.interaction.pagerStyle; folderPager.needsDisplay = true
         var config = store.preferences.interaction; config.columns = LaunchpadRules.columns; config.rows = rows
         let metrics = LauncherMetrics(availableSize: NSSize(width: width, height: folderPages.bounds.height + LauncherMetrics.verticalChrome), configuration: config)
-        updatePages(data.pages.map { $0.map(LayoutItem.app) }, surfaces: &folderPageViews, tileMap: &folderTiles, container: folderPages, metrics: metrics, columns: LaunchpadRules.columns, rows: rows, rebuild: changed || opening, inFolder: true)
+        let rootMetrics = LauncherMetrics(availableSize: NSSize(width: bounds.width, height: pages.bounds.height + LauncherMetrics.verticalChrome), configuration: store.preferences.interaction)
+        let rootIconSize = min(rootMetrics.iconSize, rootRowHeight - 32)
+        updatePages(data.pages.map { $0.map(LayoutItem.app) }, surfaces: &folderPageViews, tileMap: &folderTiles, container: folderPages, metrics: metrics, columns: LaunchpadRules.columns, rows: rows, rebuild: changed || opening, inFolder: true, iconSizeOverride: rootIconSize)
         if previousFolderPagePosition != store.pagePosition || changed || opening {
             transformPages(folderPageViews, position: store.pagePosition, container: folderPages, animated: !store.pageDragging && previousFolderPagePosition.isFinite && previousFolderPagePosition != store.pagePosition)
             previousFolderPagePosition = store.pagePosition
@@ -524,12 +536,11 @@ import SunnyDomain
     private var pagingSign: Double { store.preferences.interaction.reversePaging ? -1 : 1 }
     public func setWallpaper(_ image: NSImage) { wallpaper.image = image }
 
-    /// 显示前先提交起始状态，避免观察更新合并掉入场动画的起点。
+    /// 完成布局并设置入场起点，随后在同一轮事件中启动动画。
     public func prepareReveal() {
         layoutSubtreeIfNeeded()
         previousReveal = .nan
         render()
-        CATransaction.flush()
     }
 
     /// 窗口显示后立即提交终点，不依赖异步 Observation 更新是否合并。
@@ -620,6 +631,12 @@ import SunnyDomain
         store.beginDrag(item.id)
         ghost.contents = tile.icon.image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
         ghost.bounds = tile.icon.bounds
+        let folderDrag: Bool = if case .folder = item { true } else { false }
+        let glassDrag = folderDrag && store.preferences.style == .liquidGlass && !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        dragGlass.cornerRadius = ghost.bounds.width * 0.23
+        dragGlass.isHidden = !glassDrag
+        ghost.cornerRadius = folderDrag ? ghost.bounds.width * 0.23 : 0
+        ghost.backgroundColor = folderDrag && !glassDrag ? NSColor(white: 0.7, alpha: 0.32).cgColor : NSColor.clear.cgColor
         ghost.opacity = 0.9
         tile.alphaValue = 0.18
         moveTileDrag(event)
@@ -628,6 +645,7 @@ import SunnyDomain
         guard let source = dragSource else { return }
         let point = convert(event.locationInWindow, from: nil)
         CATransaction.begin(); CATransaction.setDisableActions(true); ghost.position = point; CATransaction.commit()
+        if !dragGlass.isHidden { dragGlass.frame = NSRect(x: point.x - ghost.bounds.width / 2, y: point.y - ghost.bounds.height / 2, width: ghost.bounds.width, height: ghost.bounds.height) }
         let map = store.folderID == nil ? tiles : folderTiles
         let activeSurface = store.folderID == nil ? pageViews[store.activePage] : folderPageViews[store.activePage]
         guard let target = map.values.first(where: { tile in
@@ -657,11 +675,11 @@ import SunnyDomain
         guard dragSource != nil else { return }
         if store.folderID != nil, !folder.frame.contains(convert(event.locationInWindow, from: nil)) { store.drop(onto: nil, page: store.pageIndex) }
         else { store.drop(onto: dragTarget, group: dragGroup && store.groupingReady) }
-        dragSource = nil; dragTarget = nil; lastPreview = nil; ghost.opacity = 0
+        dragSource = nil; dragTarget = nil; lastPreview = nil; ghost.opacity = 0; dragGlass.isHidden = true
         queueRender()
     }
     private func cancelTileDrag() {
-        store.cancelDrag(); dragSource = nil; dragTarget = nil; lastPreview = nil; ghost.opacity = 0; queueRender()
+        store.cancelDrag(); dragSource = nil; dragTarget = nil; lastPreview = nil; ghost.opacity = 0; dragGlass.isHidden = true; queueRender()
     }
 }
 

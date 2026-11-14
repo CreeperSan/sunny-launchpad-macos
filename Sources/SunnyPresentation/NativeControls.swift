@@ -61,12 +61,13 @@ import SunnyDomain
         skeleton.cornerRadius = 18
         skeleton.opacity = 0
         icon.layer?.addSublayer(skeleton)
-        folderGlass.style = .regular
-        folderGlass.cornerRadius = 18
+        folderGlass.style = .clear
+        folderGlass.cornerRadius = 24
         folderGlass.isHidden = true
         addSubview(folderGlass); addSubview(icon); addSubview(label)
         label.alignment = .center; label.maximumNumberOfLines = 2; label.font = .systemFont(ofSize: 13, weight: .medium)
         label.lineBreakMode = .byTruncatingTail
+        label.textColor = .white
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
     }
@@ -81,14 +82,14 @@ import SunnyDomain
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     func configure(title: String, image: NSImage, iconSize: CGFloat, selected: Bool, grouping: Bool, loading: Bool, folderStyle: Bool? = nil) {
         folderGlass.isHidden = folderStyle != true
-        folderGlass.layer?.borderWidth = folderStyle == true ? 1 : 0
-        folderGlass.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
         icon.layer?.backgroundColor = folderStyle == false ? NSColor(white: 0.7, alpha: 0.32).cgColor : NSColor.clear.cgColor
         icon.layer?.cornerRadius = 18
         if label.stringValue != title { label.stringValue = title; setAccessibilityLabel(title) }
         if loading { icon.image = nil; skeleton.opacity = 1 }
         else if icon.image !== image { revealIcon(image, animated: skeleton.opacity > 0) }
         let size = NSSize(width: max(16, iconSize), height: max(16, iconSize))
+        folderGlass.cornerRadius = size.width * 0.23
+        icon.layer?.cornerRadius = size.width * 0.23
         if icon.frame.size != size { icon.setFrameSize(size); needsLayout = true }
         layer?.cornerRadius = 20
         layer?.borderWidth = selected || grouping ? 2 : 0
@@ -99,6 +100,7 @@ import SunnyDomain
         icon.image = image
         LayerAnimation.apply(skeleton, key: "opacity", value: Float(0), duration: animated ? 0.16 : 0, screen: window?.screen)
     }
+
     override func layout() {
         super.layout()
         skeleton.frame = icon.bounds
@@ -132,10 +134,10 @@ import SunnyDomain
         let cell = bounds.width / CGFloat(max(count, 1))
         for index in 0..<count {
             let center = CGFloat(index) * cell + cell / 2
-            NSColor.labelColor.withAlphaComponent(index == active ? 1 : 0.35).setFill()
+            NSColor.white.withAlphaComponent(index == active ? 1 : 0.35).setFill()
             if style == .numbers {
                 let title = "\(index + 1)"
-                let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 17, weight: .medium), .foregroundColor: NSColor.labelColor]
+                let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 17, weight: .medium), .foregroundColor: NSColor.white]
                 let size = (title as NSString).size(withAttributes: attributes)
                 (title as NSString).draw(at: NSPoint(x: center - size.width / 2, y: bounds.midY - size.height / 2), withAttributes: attributes)
             } else {

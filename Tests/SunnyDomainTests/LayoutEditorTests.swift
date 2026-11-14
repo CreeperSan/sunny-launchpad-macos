@@ -89,12 +89,15 @@ struct LayoutEditorTests {
         let decoded = try JSONDecoder().decode(InteractionPreferences.self, from: old)
         #expect(decoded.backgroundBlur == 18)
         #expect(decoded.reversePaging == false)
+        #expect(decoded.coverSystemBars)
         #expect(decoded.dimColorHex == "000000")
         #expect(decoded.dimOpacity == 0.22)
         #expect(decoded.isValid)
         var invalidDim = decoded
         invalidDim.dimColorHex = "GGGGGG"
         #expect(!invalidDim.isValid)
+        let oldDisabled = try JSONDecoder().decode(InteractionPreferences.self, from: Data("{\"coverSystemBars\":false}".utf8))
+        #expect(!oldDisabled.coverSystemBars)
         invalidDim = decoded
         invalidDim.dimOpacity = 1.1
         #expect(!invalidDim.isValid)

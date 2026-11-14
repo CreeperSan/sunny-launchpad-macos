@@ -95,7 +95,7 @@ import SunnyPresentation
         closing = false
         transitionTask?.cancel()
         window.animationBehavior = .none
-        // 窗口先以轻量空视图进入当前 Space；布局构建和合成动画在随后执行。
+        // 窗口先显示空视图，再安装启动器视图并执行进入动画。
         window.setFrame(screen.frame, display: false)
         window.contentView = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
         window.level = store.preferences.interaction.coverSystemBars ? NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1) : .normal
@@ -109,11 +109,10 @@ import SunnyPresentation
         transitionTask = Task {
             await Task.yield()
             guard !Task.isCancelled else { return }
-            configure(window, on: screen)
+            // 挂载视图之前设置起点，避免首次绘制先展示完整画面。
             store.revealProgress = 0
+            configure(window, on: screen)
             (window.contentView as? NativeLauncherView)?.prepareReveal()
-            await Task.yield()
-            guard !Task.isCancelled else { return }
             applyPresentation()
             store.revealProgress = 1
             (window.contentView as? NativeLauncherView)?.performReveal()
@@ -245,6 +244,7 @@ import SunnyPresentation
     /// 左键显示启动器，右键在菜单栏图标处展示操作菜单。
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
         if NSApp.currentEvent?.type == .rightMouseUp {
+            if statusMenu == nil { rebuildMenus() }
             statusMenu?.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.minY), in: sender)
         } else { showLauncher() }
     }

@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 # 构建自包含 .app；本地 ad-hoc 签名仅供开发验证，发布需 Developer ID 与公证。
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -12,7 +12,9 @@ mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$bin_dir/SunnyLaunchpad" "$app_dir/Contents/MacOS/SunnyLaunchpad"
 cp Resources/Info.plist "$app_dir/Contents/Info.plist"
 # 兼容 SwiftPM 的原生构建与 Xcode 构建后端资源布局。
-for resource in "$bin_dir"/*.bundle(N); do
+for resource in "$bin_dir"/*.bundle; do
+    # 没有资源包时通配符会原样保留，直接跳过即可。
+    [ -d "$resource" ] || continue
     ditto "$resource" "$app_dir/Contents/Resources/$(basename "$resource")"
 done
 swift scripts/generate-icon.swift "$PWD/.build/AppIcon.iconset"

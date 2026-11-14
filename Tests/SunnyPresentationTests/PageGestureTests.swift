@@ -66,6 +66,29 @@ import SunnyDomain
         tile.configure(title: "Folder", image: NSImage(), iconSize: 80, selected: false, grouping: false, loading: false, folderStyle: false)
         #expect(glass.isHidden)
     }
+
+    @Test func folderIconsMatchRootOnLargeDisplay() async {
+        let folder = AppFolder(id: "tools", name: "Tools", pages: [["0", "1"]])
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder), .app("2")])]), catalog: (0...2).map { ApplicationRecord(id: "\($0)", name: "App \($0)") })
+        seed.catalogUpdatedAt = Date()
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 2560, height: 1440), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        window.contentView = view
+        view.layoutSubtreeIfNeeded()
+        store.activate(.folder(folder))
+        for _ in 0..<30 { await Task.yield() }
+        view.layoutSubtreeIfNeeded()
+        func tiles(in parent: NSView) -> [NativeTile] {
+            (parent as? NativeTile).map { [$0] } ?? parent.subviews.flatMap { tiles(in: $0) }
+        }
+        let all = tiles(in: view)
+        guard let root = all.first(where: { $0.item?.id == "app:2" }), let child = all.first(where: { $0.item?.id == "app:0" }) else { Issue.record("没有创建外层或文件夹图标"); return }
+        #expect(abs(root.icon.frame.width - child.icon.frame.width) < 0.01)
+    }
     @Test func dragIsContinuousAndCancellationRestoresPage() async {
         let fixture = GestureFixture()
         let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
