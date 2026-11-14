@@ -89,6 +89,36 @@ import SunnyDomain
         guard let root = all.first(where: { $0.item?.id == "app:2" }), let child = all.first(where: { $0.item?.id == "app:0" }) else { Issue.record("没有创建外层或文件夹图标"); return }
         #expect(abs(root.icon.frame.width - child.icon.frame.width) < 0.01)
     }
+
+    @Test func openFolderRoutesHitsToItsContents() async {
+        let folder = AppFolder(id: "tools", name: "Tools", pages: [["0", "1"]])
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder), .app("2")])]), catalog: (0...2).map { ApplicationRecord(id: "\($0)", name: "App \($0)") })
+        seed.catalogUpdatedAt = Date()
+        seed.preferences.reduceMotion = true
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 800), styleMask: [.titled], backing: .buffered, defer: false)
+        let parent = NSView(frame: window.contentView!.bounds)
+        window.contentView = parent
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        view.frame = NSRect(x: 40, y: 30, width: 1000, height: 700)
+        parent.addSubview(view)
+        view.layoutSubtreeIfNeeded()
+        store.activate(.folder(folder))
+        for _ in 0..<30 { await Task.yield() }
+        view.layoutSubtreeIfNeeded()
+        func descendants(of parent: NSView) -> [NSView] { parent.subviews.flatMap { [$0] + descendants(of: $0) } }
+        let all = descendants(of: view)
+        guard let child = all.compactMap({ $0 as? NativeTile }).first(where: { $0.item?.id == "app:0" }),
+              let title = all.compactMap({ $0 as? NSTextField }).first(where: { $0.stringValue == "Tools" && $0.isEditable }) else { Issue.record("没有创建文件夹内容或标题"); return }
+        let iconPoint = child.icon.convert(NSPoint(x: child.icon.bounds.midX, y: child.icon.bounds.midY), to: parent)
+        let titlePoint = title.convert(NSPoint(x: title.bounds.midX, y: title.bounds.midY), to: parent)
+        #expect(view.hitTest(iconPoint) === child)
+        #expect(view.hitTest(titlePoint) === title)
+        #expect(view.hitTest(view.convert(NSPoint(x: 5, y: 5), to: parent)) === view)
+    }
     @Test func dragIsContinuousAndCancellationRestoresPage() async {
         let fixture = GestureFixture()
         let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)

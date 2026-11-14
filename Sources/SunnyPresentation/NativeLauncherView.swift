@@ -5,6 +5,8 @@ import QuartzCore
 import SunnyDomain
 
 @MainActor public final class NativeLauncherView: NSView, NSTextFieldDelegate {
+    /// 搜索条与屏幕安全区域顶部的间距。
+    private static let searchTopSpacing: CGFloat = 38
     private let store: LaunchpadStore
     private let wallpaper = NativeImageSurface()
     private let tint = NSView()
@@ -69,7 +71,7 @@ import SunnyDomain
         addSubview(content)
         // 玻璃仅用于控件表面，避免对整个 4K 背景持续采样。
         content.addSubview(searchBackground)
-        searchGlass.style = .regular
+        searchGlass.style = .clear
         searchGlass.cornerRadius = 22
         content.addSubview(searchGlass)
         content.addSubview(searchIcon)
@@ -215,7 +217,7 @@ import SunnyDomain
         tint.frame = bounds
         content.frame = bounds
         let area = bounds.insetBy(dx: 0, dy: 0)
-        searchGlass.frame = NSRect(x: area.midX - 166, y: insets.top + 13, width: 332, height: 44)
+        searchGlass.frame = NSRect(x: area.midX - 166, y: insets.top + Self.searchTopSpacing, width: 332, height: 44)
         searchBackground.frame = searchGlass.frame
         searchIcon.frame = NSRect(x: searchGlass.frame.minX + 14, y: searchGlass.frame.midY - 8, width: 16, height: 16)
         search.frame = NSRect(x: searchGlass.frame.minX + 39, y: searchGlass.frame.midY - 11, width: searchGlass.frame.width - 54, height: 22)
@@ -515,9 +517,11 @@ import SunnyDomain
 
     /// 文件夹存在（包括回缩过程）时，根视图只路由到面板或自己，背景永远不参与命中。
     public override func hitTest(_ point: NSPoint) -> NSView? {
-        guard bounds.contains(point) else { return nil }
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
         if store.folderID != nil {
-            if folder.frame.contains(point), store.folderProgress == 1 { return folder.hitTest(convert(point, to: folder)) ?? folder }
+            // AppKit 的 hitTest 接收父视图坐标，不能提前转换成文件夹自身坐标。
+            if folder.frame.contains(local), store.folderProgress == 1 { return folder.hitTest(local) ?? folder }
             return self
         }
         return super.hitTest(point)
