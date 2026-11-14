@@ -69,6 +69,8 @@ import SunnyDomain
     private var dragGroup = false
     private var lastPreview: String?
     private var previewContext: String?
+    /// 开始拖动时的容器和页；只有跨容器或跨页的空白落点才需要追加到末尾。
+    private var dragOriginContext: String?
     private var folderTransitionTask: Task<Void, Never>?
     private var folderPanelTask: Task<Void, Never>?
     private var folderTransitionIcons: [CALayer] = []
@@ -138,6 +140,8 @@ import SunnyDomain
         search.isEditable = true
         search.isSelectable = true
         search.maximumNumberOfLines = 1
+        // 应用搜索由网格提供结果，禁止系统补全另建一个空的玻璃建议面板。
+        search.isAutomaticTextCompletionEnabled = false
         search.delegate = self
         // 搜索内容变化不触发启动，只有明确回车或点击图标才会启动。
         search.target = nil
@@ -183,6 +187,7 @@ import SunnyDomain
         ghost.zPosition = 100
         layer?.addSublayer(ghost)
         NotificationCenter.default.addObserver(self, selector: #selector(iconsLoaded(_:)), name: AppIconCache.didLoad, object: nil)
+        store.pagePositionChanged = { [weak self] in self?.pagePositionChanged() }
         observe()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -201,7 +206,8 @@ import SunnyDomain
     /// Observation 只合并业务状态更新；CA 动画的中间帧不经过此方法。
     private func observe() {
         withObservationTracking {
-            _ = store.state; _ = store.layoutRevision; _ = store.query; _ = store.pagePosition
+            _ = store.state; _ = store.layoutRevision; _ = store.query
+            _ = store.pageDragging; _ = store.pageIndex; _ = store.folderPage
             _ = store.selectedIndex; _ = store.keyboardSelection; _ = store.organizing
             _ = store.folderID; _ = store.folderProgress; _ = store.revealProgress
             _ = store.busy; _ = store.groupingReady; _ = store.groupingTarget
@@ -214,6 +220,24 @@ import SunnyDomain
             }
         }
     }
+    /// 连续输入直接提交页位置，绕过 Observation 和整页 render 的异步调度。
+    private func pagePositionChanged() {
+        guard store.pageDragging, bounds.width > 0 else { queueRender(); return }
+        let inFolder = store.folderID != nil
+        let surfaces = inFolder ? folderPageViews : pageViews
+        let position = store.pagePosition
+        let first = max(0, min(store.pageCount - 1, Int(floor(position)) - Self.pagePreloadRadius))
+        let last = max(first, min(store.pageCount - 1, Int(ceil(position)) + Self.pagePreloadRadius))
+        // 只有跨过预加载边界时才维护网格，普通移动只更新已有页面。
+        if !Set(first...last).isSubset(of: Set(surfaces.keys)) { render() }
+        else {
+            transformPages(surfaces, position: position, container: inFolder ? folderPages : pages, animated: false)
+            if inFolder { previousFolderPagePosition = position } else { previousPage = position }
+        }
+        // 拖动期间请求所在屏幕的刷新节奏，空闲后自动停止；不固定为 60Hz。
+        frameMeter.sample(for: LayerAnimation.reorderDuration)
+    }
+
     @objc private func iconsLoaded(_ notification: Notification) {
         let paths = notification.userInfo?["paths"] as? Set<String> ?? []
         // 图片准备就绪只替换对应 image，不重建网格、不改变 frame、不重新注册可访问性。
@@ -598,12 +622,15 @@ import SunnyDomain
     private func transformPages(_ surfaces: [Int: NativeSurface], position: Double, container: NSView, animated: Bool) {
         let config = store.preferences.interaction
         let duration = animated && store.motion != nil && config.pageAnimation != .none ? config.pageDuration : 0
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         for (index, view) in surfaces {
             guard let layer = view.layer else { continue }
             let distance = Double(index) - position
             let magnitude = min(abs(distance), 1)
             // 同步更新 NSView 的实际位置，确保绘制与鼠标命中使用同一坐标。
-            let oldPosition = layer.presentation()?.position ?? layer.position
+            let oldPosition = duration > 0 ? layer.presentation()?.position ?? layer.position : layer.position
             view.setFrameOrigin(NSPoint(x: distance * container.bounds.width, y: 0))
             if duration > 0 {
                 let animation = CABasicAnimation(keyPath: "position")
@@ -740,6 +767,7 @@ import SunnyDomain
     public override func mouseDragged(with event: NSEvent) {
         guard store.folderID == nil else { return }
         let point = convert(event.locationInWindow, from: nil)
+        if !pointerDragging { beginPageGesture() }
         pointerDragging = true
         store.pageWidth = Double(max(pages.bounds.width, 1))
         store.dragPage(delta: Double(point.x - pointerLast.x) * pagingSign); pointerLast = point
@@ -765,6 +793,20 @@ import SunnyDomain
         continuingReveal = false
     }
 
+    /// 鼠标和触控板都从当前可见位置接管吸附动画，避免反向拖动时跳回终点。
+    private func beginPageGesture() {
+        settleTask?.cancel()
+        let surfaces = store.folderID == nil ? pageViews : folderPageViews
+        let width = max((store.folderID == nil ? pages : folderPages).bounds.width, 1)
+        store.pageWidth = Double(width)
+        if let (index, view) = surfaces.first(where: { $0.value.layer?.animation(forKey: "pagePosition") != nil }),
+           let layer = view.layer, let visible = layer.presentation() {
+            // backing layer 的锚点由 AppKit 决定，不能假设它恒为几何中心。
+            let origin = visible.position.x - layer.anchorPoint.x * layer.bounds.width
+            store.pagePosition = Double(index) - Double(origin / width)
+        } else { store.resetPagePosition() }
+    }
+
     public override func scrollWheel(with event: NSEvent) {
         if dragSource != nil {
             dragTarget = nil; dragGroup = false; lastPreview = nil
@@ -777,15 +819,7 @@ import SunnyDomain
             if delta != 0 { store.selectPage(store.activePage + (delta < 0 ? 1 : -1) * (store.preferences.interaction.reversePaging ? -1 : 1)) }
             return
         }
-        if event.phase == .began {
-            settleTask?.cancel()
-            let surfaces = store.folderID == nil ? pageViews : folderPageViews
-            // 接续尚未结束的动画，从屏幕上实际显示的位置开始跟手。
-            if let (index, view) = surfaces.first(where: { $0.value.layer?.animation(forKey: "pagePosition") != nil }),
-               let position = view.layer?.presentation()?.position.x {
-                store.pagePosition = Double(index) - (Double(position) / store.pageWidth - 0.5)
-            } else { store.resetPagePosition() }
-        }
+        if event.phase == .began { beginPageGesture() }
         // NSEvent delta 表达内容位移；内容向左移动时，页位置应增大。
         if event.momentumPhase.isEmpty { store.dragPage(delta: -Double(delta) * pagingSign) }
         settleTask?.cancel()
@@ -813,6 +847,13 @@ import SunnyDomain
         case 36: launchSelection()
         default: super.keyDown(with: event)
         }
+    }
+    /// 搜索不是文档编辑，系统补全与纠错不应弹出独立面板，也不应替换应用名称。
+    public func controlTextDidBeginEditing(_ notification: Notification) {
+        guard notification.object as? NSTextField === search, let editor = search.currentEditor() as? NSTextView else { return }
+        editor.isAutomaticTextCompletionEnabled = false
+        editor.isAutomaticSpellingCorrectionEnabled = false
+        editor.isContinuousSpellCheckingEnabled = false
     }
     public func controlTextDidChange(_ notification: Notification) {
         if notification.object as? NSTextField === folderTitle { renameFolder(); return }
@@ -884,6 +925,7 @@ import SunnyDomain
         guard store.canEdit, !store.isSearching, let item = tile.item else { return }
         dragSource = item.id
         dragTargetPage = store.activePage
+        dragOriginContext = "\(store.folderID ?? "root")|\(store.activePage)"
         store.beginDrag(item.id)
         // 翻页时源视图可能被回收；由窗口级监听器继续接收拖动和松手。
         dragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
@@ -958,7 +1000,9 @@ import SunnyDomain
         if dragTargetPage != store.activePage { dragTarget = nil; dragGroup = false }
         if store.folderID != nil, !folder.frame.contains(convert(event.locationInWindow, from: nil)) { store.drop(onto: nil, page: store.pageIndex) }
         else {
-            if dragTarget == nil && previewContext != "\(store.folderID ?? "root")|\(store.activePage)" { store.previewMove(before: nil) }
+            let context = "\(store.folderID ?? "root")|\(store.activePage)"
+            // 原页内没有发生排位预览时保留原位置；跨页空白落点仍追加到目标页。
+            if dragTarget == nil && previewContext != context && dragOriginContext != context { store.previewMove(before: nil) }
             store.drop(onto: dragTarget, group: dragGroup && store.groupingReady)
         }
         clearTileDrag()
@@ -1016,7 +1060,7 @@ import SunnyDomain
         dragFolderCloseTask?.cancel(); dragFolderCloseTask = nil
         dragPageTask?.cancel(); dragPageTask = nil; dragPageDirection = 0
         if let dragMonitor { NSEvent.removeMonitor(dragMonitor); self.dragMonitor = nil }
-        dragSource = nil; dragTarget = nil; dragTargetPage = nil; dragGroup = false; lastPreview = nil; previewContext = nil
+        dragSource = nil; dragTarget = nil; dragTargetPage = nil; dragGroup = false; lastPreview = nil; previewContext = nil; dragOriginContext = nil
         ghost.opacity = 0; dragGlass.isHidden = true
     }
 }

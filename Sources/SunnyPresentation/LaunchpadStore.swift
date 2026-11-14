@@ -43,8 +43,14 @@ import SunnyDomain
         get { folderID == nil ? rootKeyboardSelection : folderKeyboardSelection }
         set { if folderID == nil { rootKeyboardSelection = newValue } else { folderKeyboardSelection = newValue } }
     }
-    public private(set) var rootPagePosition = 0.0
-    public private(set) var folderPagePosition = 0.0
+    /// 高频位置更新由原生视图同步消费，避免通过业务观察队列延迟一轮事件。
+    @ObservationIgnored var pagePositionChanged: (() -> Void)?
+    public private(set) var rootPagePosition = 0.0 {
+        didSet { if oldValue != rootPagePosition { pagePositionChanged?() } }
+    }
+    public private(set) var folderPagePosition = 0.0 {
+        didSet { if oldValue != folderPagePosition { pagePositionChanged?() } }
+    }
     public var pagePosition: Double {
         get { folderID == nil ? rootPagePosition : folderPagePosition }
         set { if folderID == nil { rootPagePosition = newValue } else { folderPagePosition = newValue } }
@@ -361,6 +367,8 @@ import SunnyDomain
         } else {
             updated.layout = LayoutEditor.move(source, toPage: updated.layout.pages[pageIndex].id, before: target?.id, in: updated.layout, capacity: preferences.interaction.capacity)
         }
+        // 原地松手不写盘，也不触发设置刷新和短暂的 busy 状态。
+        guard updated.layout != state.layout else { cancelDrag(); return }
         Task {
             _ = await commit(updated)
             previewLayout = nil

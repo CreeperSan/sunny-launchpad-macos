@@ -34,6 +34,7 @@ import SunnyDomain
         }
         guard let field = searchField(in: view) else { Issue.record("搜索框未创建"); return }
         #expect(field.action == nil)
+        #expect(!field.isAutomaticTextCompletionEnabled)
         _ = NSApplication.shared
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = view
@@ -42,6 +43,8 @@ import SunnyDomain
         #expect(placeholderFont == field.font)
         #expect(window.makeFirstResponder(field))
         #expect(field.currentEditor()?.isEditable == true)
+        view.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: field))
+        #expect((field.currentEditor() as? NSTextView)?.isAutomaticTextCompletionEnabled == false)
         #expect(field.cell?.usesSingleLineMode == true)
         field.stringValue = "App 0"
         view.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
@@ -380,6 +383,55 @@ import SunnyDomain
         #expect(store.activePage == 3)
         #expect(store.pagePosition == 3)
     }
+    /// 短拖动只命中源图标，不能被当作“追加到页尾”；主页面和文件夹都覆盖。
+    @Test(arguments: [false, true]) func shortTileDragKeepsOriginalOrder(inFolder: Bool) async throws {
+        let folder = AppFolder(id: "tools", name: "Tools", pages: [["0", "1", "2"]])
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: inFolder ? [.folder(folder)] : [.app("0"), .app("1"), .app("2")])]), catalog: (0..<3).map { ApplicationRecord(id: "\($0)", name: "App \($0)") })
+        seed.catalogUpdatedAt = Date()
+        seed.preferences.reduceMotion = true
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        window.contentView = view
+        if inFolder {
+            store.activate(.folder(folder))
+            for _ in 0..<30 { await Task.yield() }
+        }
+        view.layoutSubtreeIfNeeded()
+        func tiles(in parent: NSView) -> [NativeTile] { (parent as? NativeTile).map { [$0] } ?? parent.subviews.flatMap { tiles(in: $0) } }
+        let source = try #require(tiles(in: view).first { $0.item?.id == "app:0" })
+        let original = store.state.layout
+        let point = source.icon.convert(NSPoint(x: source.icon.bounds.midX + 8, y: source.icon.bounds.midY), to: nil)
+        func event(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        }
+        view.beginTileDrag(source, event: event(.leftMouseDragged))
+        view.endTileDrag(event(.leftMouseUp))
+        for _ in 0..<100 where store.dragPreviewActive { await Task.yield() }
+        #expect(store.state.layout == original)
+    }
+
+    /// 一次输入后立即改变可见页位置，不能等两个 MainActor 任务后才跟上指针。
+    @Test func pageDragUpdatesNativeFrameSynchronously() async throws {
+        let fixture = GestureFixture()
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        view.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        view.layoutSubtreeIfNeeded()
+        func tiles(in parent: NSView) -> [NativeTile] { (parent as? NativeTile).map { [$0] } ?? parent.subviews.flatMap { tiles(in: $0) } }
+        let tile = try #require(tiles(in: view).first { $0.item?.id == "app:0" })
+        let surface = try #require(tile.superview)
+        let width = try #require(surface.superview).bounds.width
+        store.pageWidth = Double(width)
+        store.dragPage(delta: -100)
+        #expect(abs(surface.frame.minX + 100) < 0.001)
+        #expect(surface.layer?.animation(forKey: "pagePosition") == nil)
+    }
+
     @Test func liveReorderIsTransientAndCancelsWithoutDataLoss() async {
         let fixture = GestureFixture()
         let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
