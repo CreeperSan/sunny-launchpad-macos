@@ -137,6 +137,29 @@ import SunnyDomain
         #expect(store.activePage == 1)
         #expect(store.pagePosition == 1)
     }
+
+    @Test func longDragLoadsAndSettlesOnTheReachedPage() async {
+        let pages = (0..<6).map { LayoutPage(items: [.app("\($0)")]) }
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: pages), catalog: (0..<6).map { ApplicationRecord(id: "\($0)", name: "App \($0)") })
+        seed.catalogUpdatedAt = Date()
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        view.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        view.layoutSubtreeIfNeeded()
+        store.pageWidth = 1000
+        store.dragPage(delta: -3200)
+        for _ in 0..<30 { await Task.yield() }
+        func tiles(in parent: NSView) -> [NativeTile] {
+            (parent as? NativeTile).map { [$0] } ?? parent.subviews.flatMap { tiles(in: $0) }
+        }
+        #expect(tiles(in: view).contains { $0.item?.id == "app:3" })
+        #expect(tiles(in: view).contains { $0.item?.id == "app:4" })
+        store.finishPageDrag()
+        #expect(store.activePage == 3)
+        #expect(store.pagePosition == 3)
+    }
     @Test func liveReorderIsTransientAndCancelsWithoutDataLoss() async {
         let fixture = GestureFixture()
         let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)

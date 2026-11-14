@@ -7,6 +7,11 @@ import SunnyDomain
 @MainActor public final class NativeLauncherView: NSView, NSTextFieldDelegate {
     /// 搜索条与屏幕安全区域顶部的间距。
     private static let searchTopSpacing: CGFloat = 38
+    /// 文件夹标题与面板之间的布局尺寸。
+    private static let folderHeaderHeight: CGFloat = 62
+    private static let folderTitleFontSize: CGFloat = 28
+    /// 手势位置两侧预备的页数。
+    private static let pagePreloadRadius = 1
     private let store: LaunchpadStore
     private let wallpaper = NativeImageSurface()
     private let tint = NSView()
@@ -41,6 +46,8 @@ import SunnyDomain
     private var previousFolderID: String?
     private var folderSource = CGRect.zero
     private var settleTask: Task<Void, Never>?
+    private var pageCleanupTask: Task<Void, Never>?
+    private var retainingAnimatedPages = false
     private var dragSource: String?
     private var dragTarget: LayoutItem?
     private var dragGroup = false
@@ -136,10 +143,12 @@ import SunnyDomain
         dragGlass.isHidden = true
         addSubview(dragGlass)
         folderTitle.isBordered = false
+        folderTitle.focusRingType = .none
         folderTitle.drawsBackground = false
         folderTitle.alignment = .center
-        folderTitle.font = .systemFont(ofSize: 23, weight: .medium)
+        folderTitle.font = .systemFont(ofSize: Self.folderTitleFontSize, weight: .medium)
         folderTitle.textColor = .white
+        folderTitle.delegate = self
         folderTitle.target = self
         folderTitle.action = #selector(renameFolder)
         folder.addSubview(folderTitle)
@@ -262,6 +271,18 @@ import SunnyDomain
         let signature = "\(store.pageIndex)|\(store.folderPage)|\(store.layoutRevision)|\(store.query)|\(config)|\(store.keyboardSelection)|\(store.selectedIndex)|\(store.groupingTarget ?? "")|\(store.groupingReady)"
         let changed = revision != signature
         revision = signature
+        let oldPosition = modal ? previousFolderPagePosition : previousPage
+        if !store.pageDragging && oldPosition.isFinite && oldPosition != store.pagePosition && store.motion != nil && config.pageAnimation != .none {
+            // 连续翻页期间保留正在运动的页面，动画结束后再回收。
+            retainingAnimatedPages = true
+            pageCleanupTask?.cancel()
+            pageCleanupTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(config.pageDuration))
+                guard !Task.isCancelled, let self else { return }
+                self.retainingAnimatedPages = false
+                self.queueRender()
+            }
+        }
         let metrics = LauncherMetrics(availableSize: NSSize(width: bounds.width, height: pages.bounds.height + LauncherMetrics.verticalChrome), configuration: config)
         let rootPages = store.isSearching ? LayoutEditor.chunks(store.searchResults.map { LayoutItem.app($0.id) }, size: config.capacity) : store.displayedLayout.pages.map(\.items)
         updateSkeleton(metrics: metrics)
@@ -305,16 +326,33 @@ import SunnyDomain
     }
 
     private func updatePages(_ data: [[LayoutItem]], surfaces: inout [Int: NativeSurface], tileMap: inout [String: NativeTile], container: NSView, metrics: LauncherMetrics, columns: Int, rows: Int, rebuild: Bool, inFolder: Bool, iconSizeOverride: CGFloat? = nil) {
-        // 数据变化才整理图标视图；跟手阶段仅改变父图层的 transform。
-        guard rebuild || surfaces.isEmpty else { return }
         let active = inFolder ? store.folderPage : store.pageIndex
-        let retained = Set(max(0, active - 1)...min(max(0, data.count - 1), active + 1))
+        guard !data.isEmpty else { return }
+        // 跟随浮点位置预加载，快速跨页时不受尚未更新的 activePage 限制。
+        let position = !inFolder && store.folderID != nil ? Double(active) : store.pagePosition
+        let first = max(0, min(data.count - 1, Int(floor(position)) - Self.pagePreloadRadius))
+        let last = max(first, min(data.count - 1, Int(ceil(position)) + Self.pagePreloadRadius))
+        var retained = Set(first...last)
+        if retainingAnimatedPages {
+            retained.formUnion(surfaces.keys.filter { $0 < data.count })
+            let previous = inFolder ? previousFolderPagePosition : previousPage
+            if previous.isFinite && !store.pageDragging && (inFolder || store.folderID == nil) {
+                // 点击分页器跨多页时，动画途经的页面也必须存在。
+                let start = max(0, min(data.count - 1, Int(floor(min(previous, position)))))
+                let end = max(start, min(data.count - 1, Int(ceil(max(previous, position)))))
+                retained.formUnion(start...end)
+            }
+        }
+        guard rebuild || Set(surfaces.keys) != retained else { return }
         let wantedIDs = Set(retained.flatMap { data[$0].map(\.id) })
         for id in Array(tileMap.keys) where !wantedIDs.contains(id) { tileMap.removeValue(forKey: id)?.removeFromSuperview() }
         for index in Array(surfaces.keys) where !retained.contains(index) { surfaces.removeValue(forKey: index)?.removeFromSuperview() }
         for pageIndex in retained {
             let surface: NativeSurface
-            if let existing = surfaces[pageIndex] { surface = existing }
+            if let existing = surfaces[pageIndex] {
+                surface = existing
+                if !rebuild { continue }
+            }
             else {
                 surface = NativeSurface()
                 // 新页面从上一帧的正确位置进入，快速连翻时不会从中央闪现。
@@ -451,15 +489,16 @@ import SunnyDomain
         let rows = min(LaunchpadRules.folderRows, max(1, Int(ceil(Double(data.pages.map(\.count).max() ?? 1) / Double(LaunchpadRules.columns)))))
         let width = min(bounds.width * 0.84, bounds.width - 80)
         let rootRowHeight = pages.bounds.height / CGFloat(store.preferences.interaction.rows)
-        let height = min(bounds.height - insets.top - insets.bottom - 120, CGFloat(rows) * rootRowHeight + 115)
+        let headerExtra = Self.folderHeaderHeight - 50
+        let height = min(bounds.height - insets.top - insets.bottom - 120, CGFloat(rows) * rootRowHeight + 115 + headerExtra)
         let target = NSRect(x: bounds.midX - width / 2, y: bounds.midY - height / 2, width: width, height: height)
         folder.frame = target
         // 标题置于半透明面板上方，布局参照 LaunchOS 的文件夹展开样式。
-        folderGlass.frame = NSRect(x: 0, y: 50, width: width, height: height - 50)
+        folderGlass.frame = NSRect(x: 0, y: Self.folderHeaderHeight, width: width, height: height - Self.folderHeaderHeight)
         folderBackground.frame = folderGlass.frame
-        folderTitle.frame = NSRect(x: 30, y: 4, width: width - 60, height: 36)
+        folderTitle.frame = NSRect(x: 30, y: 4, width: width - 60, height: 42)
         if opening { folderTitle.stringValue = data.name }
-        folderPages.frame = NSRect(x: 12, y: 65, width: width - 24, height: height - 115)
+        folderPages.frame = NSRect(x: 12, y: 65 + headerExtra, width: width - 24, height: height - 115 - headerExtra)
         folderPager.frame = NSRect(x: width / 2 - 140, y: height - 47, width: 280, height: 40)
         folderPager.count = data.pages.count; folderPager.active = store.folderPage; folderPager.style = store.preferences.interaction.pagerStyle; folderPager.needsDisplay = true
         var config = store.preferences.interaction; config.columns = LaunchpadRules.columns; config.rows = rows
@@ -531,6 +570,7 @@ import SunnyDomain
         guard store.folderID == nil else { return }
         let point = convert(event.locationInWindow, from: nil)
         pointerDragging = true
+        store.pageWidth = Double(max(pages.bounds.width, 1))
         store.dragPage(delta: Double(point.x - pointerLast.x) * pagingSign); pointerLast = point
     }
     public override func mouseUp(with event: NSEvent) {
@@ -551,12 +591,21 @@ import SunnyDomain
     public func performReveal() { render() }
 
     public override func scrollWheel(with event: NSEvent) {
+        store.pageWidth = Double(max((store.folderID == nil ? pages : folderPages).bounds.width, 1))
         let delta = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) ? event.scrollingDeltaX : event.scrollingDeltaY
         if !event.hasPreciseScrollingDeltas {
             if delta != 0 { store.selectPage(store.activePage + (delta < 0 ? 1 : -1) * (store.preferences.interaction.reversePaging ? -1 : 1)) }
             return
         }
-        if event.phase == .began { settleTask?.cancel(); store.resetPagePosition() }
+        if event.phase == .began {
+            settleTask?.cancel()
+            let surfaces = store.folderID == nil ? pageViews : folderPageViews
+            // 接续尚未结束的动画，从屏幕上实际显示的位置开始跟手。
+            if let (index, view) = surfaces.first(where: { $0.value.layer?.animation(forKey: "pagePosition") != nil }),
+               let position = view.layer?.presentation()?.position.x {
+                store.pagePosition = Double(index) - (Double(position) / store.pageWidth - 0.5)
+            } else { store.resetPagePosition() }
+        }
         // NSEvent delta 表达内容位移；内容向左移动时，页位置应增大。
         if event.momentumPhase.isEmpty { store.dragPage(delta: -Double(delta) * pagingSign) }
         settleTask?.cancel()
@@ -585,8 +634,13 @@ import SunnyDomain
         default: super.keyDown(with: event)
         }
     }
-    public func controlTextDidChange(_ notification: Notification) { store.query = search.stringValue; store.pageIndex = 0; store.selectedIndex = 0; store.resetPagePosition() }
+    public func controlTextDidChange(_ notification: Notification) {
+        if notification.object as? NSTextField === folderTitle { renameFolder(); return }
+        guard notification.object as? NSTextField === search else { return }
+        store.query = search.stringValue; store.pageIndex = 0; store.selectedIndex = 0; store.resetPagePosition()
+    }
     public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === search else { return false }
         if textView.hasMarkedText() { return false }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) { launchSelection(); return true }
         if commandSelector == #selector(NSResponder.moveToBeginningOfLine(_:)) { store.selectPage(store.activePage - 1); return true }

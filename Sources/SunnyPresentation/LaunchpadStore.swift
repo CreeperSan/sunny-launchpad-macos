@@ -11,6 +11,9 @@ import SunnyDomain
     public var pageDragging = false
     public var folderProgress = 0.0
     private var folderCloseTask: Task<Void, Never>?
+    /// 保存期间合并后续输入，避免较慢的写盘覆盖最新文件夹名称。
+    private var pendingFolderRename: (id: String, name: String)?
+    private var savingFolderRename = false
     private var dragOriginal: LaunchpadLayout?
     public var dragPreviewActive = false
     public var previewLayout: LaunchpadLayout?
@@ -196,7 +199,8 @@ import SunnyDomain
     }
     public func finishPageDrag(cancelled: Bool = false) {
         let distance = pagePosition - Double(activePage)
-        let target = abs(distance) > 0.18 ? activePage + (distance > 0 ? 1 : -1) : activePage
+        // 跨过多页时吸附到手势最终位置，短距离仍保留原有的翻页阈值。
+        let target = abs(distance) > 0.18 ? activePage + (distance > 0 ? max(1, Int(distance.rounded())) : min(-1, Int(distance.rounded()))) : activePage
         selectPage(cancelled ? activePage : target)
     }
     public func resetPagePosition() { pagePosition = Double(activePage) }
@@ -317,10 +321,20 @@ import SunnyDomain
     }
 
     public func renameFolder(_ id: String, name: String) {
-        guard canEdit else { return }
-        var updated = state
-        updated.layout = LayoutEditor.renameFolder(id, name: name, in: updated.layout, capacity: preferences.interaction.capacity)
-        Task { await commit(updated) }
+        guard !readOnly, !busy || savingFolderRename else { return }
+        pendingFolderRename = (id, name)
+        guard !savingFolderRename else { return }
+        savingFolderRename = true
+        Task {
+            defer { savingFolderRename = false }
+            while let pending = pendingFolderRename {
+                pendingFolderRename = nil
+                var updated = state
+                updated.layout = LayoutEditor.renameFolder(pending.id, name: pending.name, in: updated.layout, capacity: preferences.interaction.capacity)
+                guard updated.layout != state.layout else { continue }
+                guard await commit(updated) else { pendingFolderRename = nil; return }
+            }
+        }
     }
 
     public func discover() async {
