@@ -86,6 +86,7 @@
   "spacingScale": "アイコン間隔",
   "pageAnimation": "ページアニメーション",
   "pageDuration": "ページ切替時間",
+  "folderDuration": "フォルダアニメーションの時間",
   "windowAnimation": "表示・非表示の効果",
   "windowDuration": "切替時間",
   "pagerStyle": "ページ表示",

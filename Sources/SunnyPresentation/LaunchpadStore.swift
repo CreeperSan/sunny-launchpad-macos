@@ -8,7 +8,12 @@ import SunnyDomain
         didSet { layoutRevision += 1; catalogIndex = Dictionary(state.catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }) }
     }
     public private(set) var layoutRevision = 0
-    public var pageDragging = false
+    private var rootPageDragging = false
+    private var folderPageDragging = false
+    public var pageDragging: Bool {
+        get { folderID == nil ? rootPageDragging : folderPageDragging }
+        set { if folderID == nil { rootPageDragging = newValue } else { folderPageDragging = newValue } }
+    }
     public var folderProgress = 0.0
     private var folderCloseTask: Task<Void, Never>?
     /// 保存期间合并后续输入，避免较慢的写盘覆盖最新文件夹名称。
@@ -25,9 +30,25 @@ import SunnyDomain
     public var pageIndex = 0
     public var folderID: String?
     public var folderPage = 0
-    public var selectedIndex = 0
-    public var keyboardSelection = false
-    public var pagePosition = 0.0
+    private var rootSelectedIndex = 0
+    private var folderSelectedIndex = 0
+    private var rootKeyboardSelection = false
+    private var folderKeyboardSelection = false
+    /// 主页面与文件夹独立保存选择和连续翻页位置。
+    public var selectedIndex: Int {
+        get { folderID == nil ? rootSelectedIndex : folderSelectedIndex }
+        set { if folderID == nil { rootSelectedIndex = newValue } else { folderSelectedIndex = newValue } }
+    }
+    public var keyboardSelection: Bool {
+        get { folderID == nil ? rootKeyboardSelection : folderKeyboardSelection }
+        set { if folderID == nil { rootKeyboardSelection = newValue } else { folderKeyboardSelection = newValue } }
+    }
+    public private(set) var rootPagePosition = 0.0
+    public private(set) var folderPagePosition = 0.0
+    public var pagePosition: Double {
+        get { folderID == nil ? rootPagePosition : folderPagePosition }
+        set { if folderID == nil { rootPagePosition = newValue } else { folderPagePosition = newValue } }
+    }
     public var pageWidth = 1000.0
     public var revealProgress = 1.0
     public var groupingTarget: String?
@@ -36,6 +57,8 @@ import SunnyDomain
     public var motion: Double? {
         preferences.reduceMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : preferences.interaction.pageDuration
     }
+    /// 文件夹开合和关闭后的视图回收使用同一个时长。
+    public var folderAnimationDuration: Double { motion == nil ? 0 : preferences.interaction.folderDuration }
     public var organizing = false
     public var draggedID: String?
     public var errorMessage: String?
@@ -56,6 +79,7 @@ import SunnyDomain
     private var catalogDirty = false
     private var catalogChangeRevision = 0
     private var refreshing = false
+    private var catalogRetryTask: Task<Void, Never>?
     private let scanInterval: TimeInterval = 60 * 60
     public var catalogLoading: Bool { !loaded || (state.catalog.isEmpty && busy) }
 
@@ -122,8 +146,19 @@ import SunnyDomain
         clampPage()
     }
 
+    /// 编辑或扫描期间收到变化时稍后重试，避免丢失目录通知。
+    private func retryCatalogRefresh() {
+        guard catalogRetryTask == nil else { return }
+        catalogRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, !Task.isCancelled else { return }
+            self.catalogRetryTask = nil
+            if self.catalogDirty { await self.refresh() }
+        }
+    }
+
     public func refresh() async {
-        guard !busy, !refreshing else { return }
+        guard !busy, !refreshing else { if catalogDirty { retryCatalogRefresh() }; return }
         refreshing = true
         let scanRevision = catalogChangeRevision
         let firstLoad = state.catalog.isEmpty
@@ -132,7 +167,7 @@ import SunnyDomain
         do {
             let discovered = try await catalogService.scan()
             // 扫描期间允许使用缓存；提交阶段才短暂串行，避免覆盖正在编辑的布局。
-            if !firstLoad && (busy || draggedID != nil) { return }
+            if !firstLoad && (busy || draggedID != nil) { catalogDirty = true; retryCatalogRefresh(); return }
             busy = true
             defer { busy = false }
             var updated = LayoutEditor.reconcile(state, discovered: discovered)
@@ -140,8 +175,9 @@ import SunnyDomain
             if !readOnly { try await repository.save(updated) }
             state = updated
             lastScan = Date()
-            // 扫描期间若又有安装／删除事件，保留失效标记，下一次显示继续校验。
+            // 扫描期间若又有安装／删除事件，继续扫描，直到应用列表追上最新变化。
             catalogDirty = scanRevision != catalogChangeRevision
+            if catalogDirty { retryCatalogRefresh() }
             clampPage()
         } catch { report(error) }
     }
@@ -160,12 +196,15 @@ import SunnyDomain
         switch item {
         case .folder(let folder):
             guard folderID == nil else { return }
+            if pageDragging { finishPageDrag(cancelled: true) }
             folderCloseTask?.cancel()
             folderProgress = 0
             folderID = folder.id
             folderPage = 0
             pagePosition = 0
+            pageDragging = false
             selectedIndex = 0
+            keyboardSelection = false
             Task { await Task.yield(); folderProgress = 1 }
         case .app(let id):
             guard !organizing, let app = app(id) else { return }
@@ -218,9 +257,13 @@ import SunnyDomain
             self.groupingReady = true
             // 既有文件夹悬停展开，拖动源仍在原布局，松手前不写盘。
             if let id = self.groupingTarget, let folder = self.state.layout.folders.first(where: { "folder:\($0.id)" == id }), self.draggedID != nil {
+                if self.pageDragging { self.finishPageDrag(cancelled: true) }
                 self.folderID = folder.id
                 self.folderPage = 0
                 self.pagePosition = 0
+                self.pageDragging = false
+                self.selectedIndex = 0
+                self.keyboardSelection = false
                 self.folderProgress = 0
                 await Task.yield()
                 self.folderProgress = 1
@@ -233,12 +276,12 @@ import SunnyDomain
         guard folderID != nil, folderProgress != 0 else { return }
         folderCloseTask?.cancel()
         folderProgress = 0
+        let duration = folderAnimationDuration
         folderCloseTask = Task {
-            if motion != nil { try? await Task.sleep(for: .seconds(LayerAnimation.folderDuration)) }
+            if duration > 0 { try? await Task.sleep(for: .seconds(duration)) }
             guard !Task.isCancelled else { return }
             folderID = nil
             folderPage = 0
-            resetPagePosition()
         }
     }
 

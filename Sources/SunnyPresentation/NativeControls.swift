@@ -54,7 +54,8 @@ import SunnyDomain
     let icon = NativeImageSurface()
     private let folderGlass = NSGlassEffectView()
     private let skeleton = CALayer()
-    private let label = NSTextField(labelWithString: "")
+    /// 拖放与文件夹过渡共用图标名称的实际布局和文字。
+    let label = NSTextField(labelWithString: "")
     private var down = NSPoint.zero
     private var dragging = false
     override init(frame: NSRect) {

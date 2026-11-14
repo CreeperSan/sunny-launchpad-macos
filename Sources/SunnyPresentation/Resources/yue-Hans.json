@@ -86,6 +86,7 @@
   "spacingScale": "图标间距",
   "pageAnimation": "翻页动画",
   "pageDuration": "翻页动画时间",
+  "folderDuration": "资料夹动画时间",
   "windowAnimation": "打开／收埋动画",
   "windowDuration": "过渡动画时间",
   "pagerStyle": "分页器款式",

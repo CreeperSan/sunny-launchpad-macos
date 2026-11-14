@@ -18,17 +18,15 @@ public enum LayoutEditor {
         else { throw SunnyError.invalidLayout }
     }
 
-    /// 刷新只更新应用元数据并追加新应用；未发现应用保留原位置作为占位。
+    /// 刷新应用元数据，移除已卸载应用并追加新应用，保留其余项目的位置。
     public static func reconcile(_ state: WorkspaceState, discovered: [ApplicationRecord]) -> WorkspaceState {
         var result = state
         let scanned = Dictionary(discovered.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let previous = Set(state.catalog.map(\.id))
-        result.catalog = state.catalog.map { old in
-            if let current = scanned[old.id] { return current }
-            var missing = old
-            missing.isAvailable = false
-            return missing
-        }
+        let removed = state.catalog.filter { scanned[$0.id] == nil }
+        result.catalog = state.catalog.compactMap { scanned[$0.id] }
+        for app in removed { _ = remove("app:\(app.id)", from: &result.layout) }
+        if !removed.isEmpty { normalize(&result.layout, capacity: state.preferences.interaction.capacity) }
         let added = discovered.filter { !previous.contains($0.id) }
         result.catalog.append(contentsOf: added)
         for app in added { append(.app(app.id), to: &result.layout, capacity: state.preferences.interaction.capacity) }

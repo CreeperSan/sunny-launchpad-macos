@@ -10,6 +10,10 @@ import SunnyDomain
     /// 文件夹标题与面板之间的布局尺寸。
     private static let folderHeaderHeight: CGFloat = 62
     private static let folderTitleFontSize: CGFloat = 28
+    /// 文件夹标题只作上下滑动，不跟随文件夹缩略图缩放。
+    private static let folderTitleOffset: CGFloat = 16
+    /// 缩略图未展示的图标在淡入淡出时保留轻微缩放。
+    private static let folderExtraIconScale: CGFloat = 0.8
     /// 文件夹详情玻璃容器的目标圆角。
     private static let folderCornerRadius: CGFloat = 44
     /// 曲线求解精度以及无法读取屏幕刷新率时的兜底帧率。
@@ -63,6 +67,7 @@ import SunnyDomain
     private var folderPanelTask: Task<Void, Never>?
     private var folderTransitionIcons: [CALayer] = []
     private var folderTransitionHiddenIcons: [CALayer] = []
+    private var folderTransitionHiddenLabels: [NSView] = []
     private var dragMonitor: Any?
     private var dragPageTask: Task<Void, Never>?
     private var dragPageDirection = 0
@@ -298,8 +303,12 @@ import SunnyDomain
             if changed || previousPage != store.pagePosition {
                 transformPages(pageViews, position: store.pagePosition, container: pages, animated: !store.pageDragging && previousPage.isFinite && previousPage != store.pagePosition)
             }
+            previousPage = store.pagePosition
+        } else if previousFolderID != store.folderID {
+            // 打开文件夹时先固定主页面，避免尚未结束的翻页在关闭时再次播放。
+            transformPages(pageViews, position: store.rootPagePosition, container: pages, animated: false)
+            previousPage = store.rootPagePosition
         }
-        previousPage = store.pagePosition
         updateFolder(changed: changed)
         if previousReveal != store.revealProgress {
             let progress = store.revealProgress
@@ -334,7 +343,7 @@ import SunnyDomain
         let active = inFolder ? store.folderPage : store.pageIndex
         guard !data.isEmpty else { return }
         // 跟随浮点位置预加载，快速跨页时不受尚未更新的 activePage 限制。
-        let position = !inFolder && store.folderID != nil ? Double(active) : store.pagePosition
+        let position = inFolder ? store.folderPagePosition : store.rootPagePosition
         let first = max(0, min(data.count - 1, Int(floor(position)) - Self.pagePreloadRadius))
         let last = max(first, min(data.count - 1, Int(ceil(position)) + Self.pagePreloadRadius))
         var retained = Set(first...last)
@@ -362,7 +371,7 @@ import SunnyDomain
                 surface = NativeSurface()
                 // 新页面从上一帧的正确位置进入，快速连翻时不会从中央闪现。
                 let previous = inFolder ? previousFolderPagePosition : previousPage
-                let initial = previous.isFinite ? previous : store.pagePosition
+                let initial = previous.isFinite ? previous : position
                 surface.frame = NSRect(x: (Double(pageIndex) - initial) * container.bounds.width, y: 0, width: container.bounds.width, height: container.bounds.height)
                 surfaces[pageIndex] = surface; container.addSubview(surface)
             }
@@ -484,15 +493,41 @@ import SunnyDomain
         }
     }
 
-    /// 使用独立图层承接前九个图标，玻璃和文字保持各自的动画。
+    /// 过渡期间由独立文字图层接管真实标签，避免两份文字重叠。
+    private func animateFolderText(_ text: String, from source: CGRect, sourceFont: CGFloat, to destination: CGRect, destinationFont: CGFloat, opening: Bool, fade: Bool, duration: Double) {
+        guard let layer, !source.isEmpty, !destination.isEmpty else { return }
+        let proxy = CATextLayer()
+        proxy.string = text
+        proxy.font = NSFont.systemFont(ofSize: destinationFont, weight: .medium)
+        proxy.fontSize = opening ? destinationFont : sourceFont
+        proxy.foregroundColor = NSColor.white.cgColor
+        proxy.alignmentMode = .center
+        proxy.truncationMode = .end
+        proxy.isWrapped = true
+        proxy.contentsScale = window?.backingScaleFactor ?? 2
+        proxy.zPosition = 91
+        let start = opening ? source : destination
+        let end = opening ? destination : source
+        proxy.frame = end
+        layer.addSublayer(proxy)
+        folderTransitionIcons.append(proxy)
+        LayerAnimation.apply(proxy, key: "position", value: NSValue(point: CGPoint(x: end.midX, y: end.midY)), duration: duration, screen: window?.screen, startValue: NSValue(point: CGPoint(x: start.midX, y: start.midY)))
+        LayerAnimation.apply(proxy, key: "bounds", value: NSValue(rect: CGRect(origin: .zero, size: end.size)), duration: duration, screen: window?.screen, startValue: NSValue(rect: CGRect(origin: .zero, size: start.size)))
+        LayerAnimation.apply(proxy, key: "fontSize", value: opening ? destinationFont : sourceFont, duration: duration, screen: window?.screen, startValue: opening ? sourceFont : destinationFont)
+        if fade { LayerAnimation.apply(proxy, key: "opacity", value: Float(opening ? 1 : 0), duration: duration, screen: window?.screen, startValue: Float(opening ? 0 : 1)) }
+    }
+
+    /// 使用独立图层承接前九个图标及名称。
     private func animateFolderTransition(_ data: AppFolder, opening: Bool, duration: Double) {
         folderTransitionTask?.cancel()
         folderTransitionIcons.forEach { $0.removeFromSuperlayer() }
         folderTransitionHiddenIcons.forEach { $0.opacity = 1 }
-        folderTransitionIcons.removeAll(); folderTransitionHiddenIcons.removeAll()
-        guard duration > 0, store.folderPage == 0, let layer else { return }
+        folderTransitionHiddenLabels.forEach { $0.isHidden = false }
+        folderTransitionIcons.removeAll(); folderTransitionHiddenIcons.removeAll(); folderTransitionHiddenLabels.removeAll()
+        guard duration > 0, let layer else { return }
         folder.layoutSubtreeIfNeeded()
-        for (index, id) in data.appIDs.prefix(9).enumerated() {
+        let ids = store.folderPage == 0 ? Array(data.appIDs.prefix(9)) : []
+        for (index, id) in ids.enumerated() {
             guard let tile = folderTiles["app:\(id)"], tile.superview === folderPageViews[0] else { continue }
             tile.layoutSubtreeIfNeeded()
             let destination = tile.icon.convert(tile.icon.bounds, to: self)
@@ -510,13 +545,43 @@ import SunnyDomain
             let end = opening ? destination : source
             LayerAnimation.apply(proxy, key: "position", value: NSValue(point: CGPoint(x: end.midX, y: end.midY)), duration: duration, screen: window?.screen, startValue: NSValue(point: CGPoint(x: start.midX, y: start.midY)))
             LayerAnimation.apply(proxy, key: "bounds", value: NSValue(rect: CGRect(origin: .zero, size: end.size)), duration: duration, screen: window?.screen, startValue: NSValue(rect: CGRect(origin: .zero, size: start.size)))
+            let labelFrame = tile.label.convert(tile.label.bounds, to: self)
+            let scale = source.width / max(destination.width, 1)
+            let labelSource = CGRect(x: source.midX - labelFrame.width * scale / 2, y: source.maxY, width: labelFrame.width * scale, height: labelFrame.height * scale)
+            let fontSize = tile.label.font?.pointSize ?? NSFont.systemFontSize
+            animateFolderText(tile.label.stringValue, from: labelSource, sourceFont: fontSize * scale, to: labelFrame, destinationFont: fontSize, opening: opening, fade: true, duration: duration)
+            tile.label.isHidden = true
+            folderTransitionHiddenLabels.append(tile.label)
+        }
+        // 没有缩略图对应位置的图标单独淡入淡出并缩放，避免突然出现。
+        let visibleIDs = data.pages.indices.contains(store.folderPage) ? data.pages[store.folderPage] : []
+        let fadingIDs = store.folderPage == 0 ? visibleIDs.dropFirst(9) : visibleIDs.dropFirst(0)
+        for id in fadingIDs {
+            guard let tile = folderTiles["app:\(id)"], tile.superview === folderPageViews[store.folderPage], let iconLayer = tile.icon.layer else { continue }
+            tile.layoutSubtreeIfNeeded()
+            let iconFrame = tile.icon.convert(tile.icon.bounds, to: self)
+            let proxy = CALayer()
+            proxy.contents = AppIconCache.shared.image(for: store.app(id)).cgImage(forProposedRect: nil, context: nil, hints: nil)
+            proxy.contentsGravity = .resizeAspect; proxy.frame = iconFrame; proxy.zPosition = 90
+            layer.addSublayer(proxy)
+            folderTransitionIcons.append(proxy)
+            iconLayer.opacity = 0; folderTransitionHiddenIcons.append(iconLayer)
+            LayerAnimation.apply(proxy, key: "opacity", value: Float(opening ? 1 : 0), duration: duration, screen: window?.screen, startValue: Float(opening ? 0 : 1))
+            let fullBounds = CGRect(origin: .zero, size: iconFrame.size)
+            let smallBounds = CGRect(origin: .zero, size: CGSize(width: iconFrame.width * Self.folderExtraIconScale, height: iconFrame.height * Self.folderExtraIconScale))
+            LayerAnimation.apply(proxy, key: "bounds", value: NSValue(rect: opening ? fullBounds : smallBounds), duration: duration, screen: window?.screen, startValue: NSValue(rect: opening ? smallBounds : fullBounds))
+            let labelFrame = tile.label.convert(tile.label.bounds, to: self)
+            let fontSize = tile.label.font?.pointSize ?? NSFont.systemFontSize
+            animateFolderText(tile.label.stringValue, from: labelFrame, sourceFont: fontSize, to: labelFrame, destinationFont: fontSize, opening: opening, fade: true, duration: duration)
+            tile.label.isHidden = true; folderTransitionHiddenLabels.append(tile.label)
         }
         folderTransitionTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(duration))
             guard !Task.isCancelled, let self else { return }
             self.folderTransitionIcons.forEach { $0.removeFromSuperlayer() }
             self.folderTransitionHiddenIcons.forEach { $0.opacity = 1 }
-            self.folderTransitionIcons.removeAll(); self.folderTransitionHiddenIcons.removeAll()
+            self.folderTransitionHiddenLabels.forEach { $0.isHidden = false }
+            self.folderTransitionIcons.removeAll(); self.folderTransitionHiddenIcons.removeAll(); self.folderTransitionHiddenLabels.removeAll()
         }
     }
 
@@ -569,6 +634,8 @@ import SunnyDomain
         }
         let opening = previousFolderID != data.id
         if opening {
+            settleTask?.cancel(); settleTask = nil
+            previousFolderPagePosition = .nan
             if let tile = tiles["folder:\(data.id)"] { folderSource = tile.icon.convert(tile.icon.bounds, to: self).intersection(bounds) }
             if folderSource.isEmpty { folderSource = NSRect(x: bounds.midX - 40, y: bounds.midY - 40, width: 80, height: 80) }
             previousFolderID = data.id
@@ -602,13 +669,17 @@ import SunnyDomain
         if previousFolderProgress != store.folderProgress || opening {
             let progress = store.folderProgress
             let source = convert(folderSource, to: folder)
-            let duration = store.motion == nil || (opening && progress == 0) ? 0 : LayerAnimation.folderDuration
+            let duration = opening && progress == 0 ? 0 : store.folderAnimationDuration
             let sourceRadius = min(source.width, source.height) * NativeTile.folderCornerRadiusRatio
             let start = opening ? source : folderGlass.frame
             let startRadius = opening ? sourceRadius : folderGlass.cornerRadius
             animateFolderPanel(from: start, radius: startRadius, to: progress == 0 ? source : panel, radius: progress == 0 ? sourceRadius : Self.folderCornerRadius, duration: duration)
             for layer in [folderTitle.layer, folderPages.layer, folderPager.layer].compactMap({ $0 }) {
                 LayerAnimation.apply(layer, key: "opacity", value: Float(progress), duration: duration, screen: window?.screen, startValue: opening && progress == 1 ? Float(0) : nil)
+            }
+            if let layer = folderTitle.layer {
+                let offset = CATransform3DMakeTranslation(0, Self.folderTitleOffset, 0)
+                LayerAnimation.apply(layer, key: "transform", value: NSValue(caTransform3D: progress == 0 ? offset : CATransform3DIdentity), duration: duration, screen: window?.screen, startValue: opening && progress == 1 ? NSValue(caTransform3D: offset) : nil)
             }
             if duration > 0 { animateFolderTransition(data, opening: progress == 1, duration: duration) }
             if let layer = content.layer { LayerAnimation.apply(layer, key: "opacity", value: Float((1 - progress) * store.revealProgress), duration: duration, screen: window?.screen, startValue: opening && progress == 1 ? Float(store.revealProgress) : nil) }

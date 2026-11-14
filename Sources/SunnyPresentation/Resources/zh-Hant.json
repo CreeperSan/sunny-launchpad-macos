@@ -86,6 +86,7 @@
   "spacingScale": "圖示間距",
   "pageAnimation": "翻頁動畫",
   "pageDuration": "翻頁動畫時間",
+  "folderDuration": "資料夾動畫時間",
   "windowAnimation": "進入／退出動畫",
   "windowDuration": "過渡動畫時間",
   "pagerStyle": "分頁器樣式",

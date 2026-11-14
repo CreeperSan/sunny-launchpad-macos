@@ -4,7 +4,6 @@ import QuartzCore
 
 @MainActor enum LayerAnimation {
     // 以下为 Sunny 的调校值，非 Apple 未公开的“原生常量”。
-    static let folderDuration = 0.30
     static let reorderDuration = 0.20
     static let folderHoverDelay: Duration = .milliseconds(450)
     /// 文件夹视图逐帧插值与图层动画共用同一条缓动曲线。

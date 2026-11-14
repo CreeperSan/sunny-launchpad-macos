@@ -86,6 +86,7 @@
   "spacingScale": "Icon spacing",
   "pageAnimation": "Page animation",
   "pageDuration": "Page duration",
+  "folderDuration": "Folder animation duration",
   "windowAnimation": "Open / close transition",
   "windowDuration": "Transition duration",
   "pagerStyle": "Page indicator",

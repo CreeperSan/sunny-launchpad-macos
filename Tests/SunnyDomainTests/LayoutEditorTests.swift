@@ -22,12 +22,20 @@ struct LayoutEditorTests {
         #expect(Set(layout.appIDs) == Set(apps.map(\.id)))
     }
 
-    @Test func refreshKeepsMissingAppsAndOrder() {
+    @Test func refreshRemovesMissingAppsAndKeepsOrder() {
         let state = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.app("b"), .app("a")])]), catalog: Array(apps.prefix(2)))
         let refreshed = LayoutEditor.reconcile(state, discovered: [apps[0], apps[2]])
-        #expect(refreshed.layout.appIDs == ["b", "a", "c"])
-        #expect(refreshed.catalog.first { $0.id == "b" }?.isAvailable == false)
+        #expect(refreshed.layout.appIDs == ["a", "c"])
+        #expect(!refreshed.catalog.contains { $0.id == "b" })
         #expect(LayoutEditor.reconcile(refreshed, discovered: [apps[0], apps[2]]) == refreshed)
+    }
+
+    @Test func refreshRemovesMissingAppsFromFolders() throws {
+        let folder = AppFolder(id: "folder", name: "工具", pages: [["a", "b"], ["c"]])
+        let state = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder), .app("d")])]), catalog: apps)
+        let refreshed = LayoutEditor.reconcile(state, discovered: [apps[0], apps[3]])
+        #expect(refreshed.layout.pages[0].items == [.app("a"), .app("d")])
+        try LayoutEditor.validate(refreshed)
     }
 
     @Test func overflowDoesNotDropApps() throws {
@@ -94,12 +102,19 @@ struct LayoutEditorTests {
     @Test func existingInteractionObjectReceivesBlurAndDirectionDefaults() throws {
         let old = Data("{\"columns\":7,\"rows\":5,\"pageAnimation\":\"slide\"}".utf8)
         let decoded = try JSONDecoder().decode(InteractionPreferences.self, from: old)
+        #expect(decoded.folderDuration == InteractionPreferences.defaultFolderDuration)
         #expect(decoded.backgroundBlur == 18)
         #expect(decoded.reversePaging == false)
         #expect(decoded.coverSystemBars)
         #expect(decoded.dimColorHex == "000000")
         #expect(decoded.dimOpacity == 0.22)
         #expect(decoded.isValid)
+        var custom = decoded
+        custom.folderDuration = 1.1
+        let restored = try JSONDecoder().decode(InteractionPreferences.self, from: JSONEncoder().encode(custom))
+        #expect(restored.folderDuration == 1.1)
+        custom.folderDuration = 1.6
+        #expect(!custom.isValid)
         var invalidDim = decoded
         invalidDim.dimColorHex = "GGGGGG"
         #expect(!invalidDim.isValid)

@@ -7,9 +7,10 @@ import SunnyDomain
 @MainActor public final class NativeSettingsView: NSView {
     private let store: LaunchpadStore
     private let dataDirectory: URL
-    private let sidebar = NSStackView()
+    private let sidebarBackground = NSVisualEffectView()
+    private let sidebar = NativeSettingsStack()
     private let scroll = NSScrollView()
-    private let form = NSStackView()
+    private let form = NativeSettingsStack()
     private var section = "general"
     private var actions: [NativeControlAction] = []
     private var key = ""
@@ -19,12 +20,17 @@ import SunnyDomain
         self.store = store
         self.dataDirectory = dataDirectory
         super.init(frame: .zero)
-        sidebar.orientation = .vertical; sidebar.alignment = .leading; sidebar.spacing = 10
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        sidebarBackground.material = .sidebar; sidebarBackground.blendingMode = .withinWindow; sidebarBackground.state = .active
+        addSubview(sidebarBackground)
+        sidebar.orientation = .vertical; sidebar.alignment = .leading; sidebar.spacing = 6
         addSubview(sidebar)
         scroll.hasVerticalScroller = true; scroll.drawsBackground = false
+        scroll.borderType = .noBorder
         addSubview(scroll)
-        form.orientation = .vertical; form.alignment = .leading; form.spacing = 20
-        form.edgeInsets = NSEdgeInsets(top: 28, left: 28, bottom: 28, right: 28)
+        form.orientation = .vertical; form.alignment = .leading; form.spacing = 14
+        form.edgeInsets = NSEdgeInsets(top: 32, left: 32, bottom: 36, right: 32)
         scroll.documentView = form
         form.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([form.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)])
@@ -35,6 +41,7 @@ import SunnyDomain
     public override var isFlipped: Bool { true }
     public override func layout() {
         super.layout()
+        sidebarBackground.frame = NSRect(x: 0, y: 0, width: 220, height: bounds.height)
         sidebar.frame = NSRect(x: 18, y: 28, width: 192, height: bounds.height - 56)
         scroll.frame = NSRect(x: 220, y: 0, width: max(400, bounds.width - 220), height: bounds.height)
     }
@@ -55,9 +62,21 @@ import SunnyDomain
         let brand = NSTextField(labelWithString: "☀︎ Sunny Launchpad")
         brand.font = .systemFont(ofSize: 18, weight: .semibold)
         sidebar.addArrangedSubview(brand)
-        for id in ["general", "appearance", "interaction", "import", "about"] {
-            let button = makeButton(store.text(id)) { [weak self] in self?.section = id; self?.key = ""; self?.render() }
-            button.bezelStyle = .rounded
+        let sections = [("general", "gearshape"), ("appearance", "paintpalette"), ("interaction", "square.grid.3x3"), ("import", "tray.and.arrow.down"), ("about", "info.circle")]
+        for (id, symbol) in sections {
+            let button = makeButton(store.text(id)) { [weak self] in
+                guard let self, self.section != id else { return }
+                self.section = id; self.key = ""; self.render()
+                self.scroll.contentView.scroll(to: .zero); self.scroll.reflectScrolledClipView(self.scroll.contentView)
+            }
+            button.bezelStyle = .inline
+            button.alignment = .left
+            button.font = .systemFont(ofSize: 13, weight: section == id ? .semibold : .regular)
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            button.imagePosition = .imageLeading
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 8
+            button.layer?.backgroundColor = section == id ? NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor : NSColor.clear.cgColor
             button.contentTintColor = section == id ? .controlAccentColor : .labelColor
             sidebar.addArrangedSubview(button)
             button.widthAnchor.constraint(equalToConstant: 192).isActive = true
@@ -81,11 +100,11 @@ import SunnyDomain
             alert.beginSheetModal(for: window) { [weak store] _ in Task { @MainActor in store?.errorMessage = nil } }
         }
     }
-    private func title(_ text: String) { let field = NSTextField(labelWithString: text); field.font = .systemFont(ofSize: 26, weight: .bold); add(field) }
-    private func label(_ text: String) { let field = NSTextField(wrappingLabelWithString: text); field.isSelectable = true; add(field) }
+    private func title(_ text: String) { let field = NSTextField(labelWithString: text); field.font = .systemFont(ofSize: 25, weight: .bold); add(field); form.setCustomSpacing(24, after: field) }
+    private func label(_ text: String) { let field = NSTextField(wrappingLabelWithString: text); field.font = .systemFont(ofSize: 13); field.isSelectable = true; add(field) }
     private func add(_ view: NSView) {
         form.addArrangedSubview(view)
-        view.widthAnchor.constraint(equalTo: form.widthAnchor, constant: -56).isActive = true
+        view.widthAnchor.constraint(equalTo: form.widthAnchor, constant: -64).isActive = true
     }
     private func makeButton(_ title: String, action: @escaping () -> Void) -> NSButton {
         let target = NativeControlAction(action)
@@ -169,6 +188,7 @@ import SunnyDomain
         number("spacingScale", path: \.interaction.spacingScale, range: 0.5...1.5, percentage: true)
         picker("pageAnimation", values: PageAnimation.allCases, names: PageAnimation.allCases.map { store.text($0.rawValue) }, path: \.interaction.pageAnimation)
         number("pageDuration", path: \.interaction.pageDuration, range: 0...1.5)
+        number("folderDuration", path: \.interaction.folderDuration, range: InteractionPreferences.animationDurationRange)
         picker("windowAnimation", values: WindowAnimation.allCases, names: WindowAnimation.allCases.map { store.text($0 == .classic ? "classicZoom" : $0.rawValue) }, path: \.interaction.windowAnimation)
         number("windowDuration", path: \.interaction.windowDuration, range: 0...1.5)
         picker("pagerStyle", values: PagerStyle.allCases, names: PagerStyle.allCases.map { store.text($0.rawValue) }, path: \.interaction.pagerStyle)
@@ -209,6 +229,11 @@ import SunnyDomain
         }
         button("openData") { [weak self] in if let self { NSWorkspace.shared.open(self.dataDirectory) } }
     }
+}
+
+/// 翻转文档坐标，所有设置页都从顶部开始排列和滚动。
+@MainActor private final class NativeSettingsStack: NSStackView {
+    override var isFlipped: Bool { true }
 }
 
 @MainActor private final class NativeControlAction: NSObject {

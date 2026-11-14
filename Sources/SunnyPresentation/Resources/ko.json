@@ -86,6 +86,7 @@
   "spacingScale": "아이콘 간격",
   "pageAnimation": "페이지 애니메이션",
   "pageDuration": "페이지 전환 시간",
+  "folderDuration": "폴더 애니메이션 시간",
   "windowAnimation": "열기 및 닫기 효과",
   "windowDuration": "전환 시간",
   "pagerStyle": "페이지 표시",

@@ -110,6 +110,13 @@ import SunnyDomain
         #expect(source.isHidden)
         let icons = (view.layer?.sublayers ?? []).filter { $0.zPosition == 90 }
         #expect(icons.count == 3)
+        let names = (view.layer?.sublayers ?? []).compactMap { $0 as? CATextLayer }.filter { $0.zPosition == 91 }
+        #expect(Set(names.compactMap { $0.string as? String }) == Set(["App 0", "App 1", "App 2"]))
+        func descendants(_ parent: NSView) -> [NSView] { parent.subviews.flatMap { [$0] + descendants($0) } }
+        let folderTitle = descendants(view).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Tools" && $0.isEditable }
+        #expect(folderTitle?.isHidden == false)
+        let title = tiles(in: view).first { $0.item?.id == "app:0" }
+        #expect(title?.label.isHidden == true)
         let expandedPositions = icons.map(\.position)
         store.closeFolder()
         for _ in 0..<40 { await Task.yield() }
@@ -117,6 +124,113 @@ import SunnyDomain
         #expect(closing.count == 3)
         #expect(closing.map(\.position) != expandedPositions)
         #expect(source.isHidden)
+        #expect((view.layer?.sublayers ?? []).compactMap { $0 as? CATextLayer }.filter { $0.zPosition == 91 }.count == 3)
+        #expect((folderTitle?.layer?.transform.m42 ?? 0) != 0)
+    }
+
+    @Test func folderCloseUsesConfiguredDuration() async throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let folder = AppFolder(id: "tools", name: "Tools", pages: [["0", "1"]])
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder)])]), catalog: (0...1).map { ApplicationRecord(id: "\($0)", name: "App \($0)") })
+        seed.catalogUpdatedAt = Date()
+        seed.preferences.interaction.folderDuration = 0.4
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        store.activate(.folder(folder))
+        for _ in 0..<20 { await Task.yield() }
+        #expect(store.folderAnimationDuration == 0.4)
+        store.closeFolder()
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(store.folderID == "tools")
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(store.folderID == nil)
+    }
+
+    @Test func folderPagingDoesNotChangeRootPageOrAnimateItOnClose() async throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let ids = (0..<LaunchpadRules.folderCapacity + 2).map { "f\($0)" }
+        let folder = AppFolder(id: "tools", name: "Tools", pages: LayoutEditor.chunks(ids, size: LaunchpadRules.folderCapacity))
+        let pages = [LayoutPage(items: [.app("a")]), LayoutPage(items: [.app("b")]), LayoutPage(items: [.folder(folder), .app("c")])]
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: pages), catalog: (["a", "b", "c"] + ids).map { ApplicationRecord(id: $0, name: $0) })
+        seed.catalogUpdatedAt = Date()
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        window.contentView = view
+        view.layoutSubtreeIfNeeded()
+        store.selectPage(2)
+        store.selectedIndex = 1; store.keyboardSelection = true
+        try await Task.sleep(for: .milliseconds(400))
+        func tiles(in parent: NSView) -> [NativeTile] { (parent as? NativeTile).map { [$0] } ?? parent.subviews.flatMap { tiles(in: $0) } }
+        let source = try #require(tiles(in: view).first { $0.item?.id == "folder:tools" })
+        let rootPage = try #require(source.superview)
+        store.activate(.folder(folder))
+        for _ in 0..<40 { await Task.yield() }
+        #expect(store.rootPagePosition == 2)
+        #expect(store.pagePosition == 0)
+        store.selectPage(1)
+        #expect(store.folderPagePosition == 1)
+        #expect(store.rootPagePosition == 2)
+        store.closeFolder()
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(store.pageIndex == 2 && store.pagePosition == 2)
+        #expect(store.selectedIndex == 1 && store.keyboardSelection)
+        #expect(rootPage.layer?.animation(forKey: "pagePosition") == nil)
+        #expect(abs(rootPage.frame.minX) < 0.01)
+    }
+
+    @Test func extraFolderIconsFadeAndScale() async throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let ids = (0..<12).map { "\($0)" }
+        let folder = AppFolder(id: "tools", name: "Tools", pages: [ids])
+        var seed = WorkspaceState(layout: LaunchpadLayout(pages: [LayoutPage(items: [.folder(folder)])]), catalog: ids.map { ApplicationRecord(id: $0, name: "App \($0)") })
+        seed.catalogUpdatedAt = Date()
+        seed.preferences.interaction.folderDuration = 1
+        let fixture = GestureFixture(seed: seed)
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NativeLauncherView(store: store, wallpaper: nil, screenInsets: NSEdgeInsets())
+        window.contentView = view
+        view.layoutSubtreeIfNeeded()
+        store.activate(.folder(folder))
+        for _ in 0..<40 { await Task.yield() }
+        let icons = (view.layer?.sublayers ?? []).filter { $0.zPosition == 90 }
+        #expect(icons.count == 12)
+        store.closeFolder()
+        for _ in 0..<40 { await Task.yield() }
+        let closing = (view.layer?.sublayers ?? []).filter { $0.zPosition == 90 }
+        #expect(closing.count == 12)
+        #expect(closing.filter { $0.opacity == 0 }.count == 3)
+        #expect(closing.suffix(3).allSatisfy { $0.bounds.width > 0 })
+    }
+
+    @Test func settingsSectionsStartAtTop() async throws {
+        let fixture = GestureFixture()
+        let store = LaunchpadStore(catalog: fixture, repository: fixture, importer: fixture, launcher: fixture)
+        await store.prepare()
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NativeSettingsView(store: store, dataDirectory: URL(fileURLWithPath: "/tmp"))
+        window.contentView = view
+        func descendants(_ parent: NSView) -> [NSView] { parent.subviews.flatMap { [$0] + descendants($0) } }
+        view.layoutSubtreeIfNeeded()
+        let scroll = try #require(descendants(view).compactMap { $0 as? NSScrollView }.first)
+        for key in ["general", "appearance", "interaction", "import", "about"] {
+            let button = try #require(descendants(view).compactMap { $0 as? NSButton }.first { $0.title == store.text(key) })
+            button.performClick(nil)
+            view.layoutSubtreeIfNeeded()
+            let stack = try #require(scroll.documentView as? NSStackView)
+            #expect(stack.isFlipped)
+            let heading = try #require(stack.arrangedSubviews.first)
+            #expect(heading.frame.minY < stack.bounds.midY)
+            #expect(abs(scroll.contentView.bounds.minY) < 1)
+        }
     }
 
     @Test func folderSourceRestoresAfterClosing() async {

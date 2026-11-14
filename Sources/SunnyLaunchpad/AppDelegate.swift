@@ -45,6 +45,8 @@ import SunnyPresentation
         NotificationCenter.default.addObserver(self, selector: #selector(systemLocaleChanged), name: NSLocale.currentLocaleDidChangeNotification, object: nil)
         rebuildMenus()
         ready = true
+        // 启动时校验缓存，补上程序未运行期间的安装或卸载。
+        store.markCatalogDirty()
         showLauncher()
         Task { [self] in
             await Task.yield()
